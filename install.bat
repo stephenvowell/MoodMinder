@@ -4,8 +4,8 @@ cd /d "%~dp0"
 title HumanPredict Installer
 
 echo.
-echo  HumanPredict Installer
-echo  ----------------------
+echo  Mood Minder Installer
+echo  ---------------------
 echo  This will:
 echo    1) Check for Python 3.10+
 echo    2) Create a local virtual environment

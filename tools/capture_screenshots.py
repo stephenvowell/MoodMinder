@@ -53,7 +53,7 @@ def window_title(hwnd) -> str:
 
 
 def find_humanpredict():
-    """Find the Tk app window, not an editor tab that happens to mention HumanPredict."""
+    """Find the Mood Minder Tk window (not an editor tab)."""
     targets = []
     skip_bits = ("cursor", "visual studio", "notepad", "chrome", "firefox", "edge")
 
@@ -62,30 +62,13 @@ def find_humanpredict():
             return True
         title = window_title(hwnd)
         lower = title.lower()
-        if "humanpredict" not in lower:
-            return True
         if any(bit in lower for bit in skip_bits):
             return True
-        # Prefer the real app title from app.py
-        if "hr call-in" in lower or title.strip().startswith("HumanPredict"):
+        if "mood minder" in lower or title.strip() == "Mood Minder":
             targets.append((hwnd, title))
         return True
 
     user32.EnumWindows(EnumWindowsProc(cb), 0)
-    if targets:
-        return targets
-
-    # Fallback: any visible HumanPredict title that is not an editor
-    def cb2(hwnd, _lparam):
-        if not user32.IsWindowVisible(hwnd):
-            return True
-        title = window_title(hwnd)
-        lower = title.lower()
-        if "humanpredict" in lower and not any(bit in lower for bit in skip_bits):
-            targets.append((hwnd, title))
-        return True
-
-    user32.EnumWindows(EnumWindowsProc(cb2), 0)
     return targets
 
 
@@ -168,7 +151,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     targets = find_humanpredict()
     if not targets:
-        print("NO_WINDOW: Start the app first (python app.py)")
+        print("NO_WINDOW: Start Mood Minder first (python app.py)")
         return 2
     hwnd, title = targets[0]
     print(f"Capturing: {title}")

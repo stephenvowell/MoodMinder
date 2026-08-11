@@ -1,57 +1,35 @@
-"""Tkinter UI tuned for HR call-in pattern tracking and prediction."""
+"""Mood Minder — daily mood journal with pattern insights (stephenv.net colors)."""
+
+from __future__ import annotations
 
 import json
 import os
 import sys
 import tkinter as tk
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, messagebox, ttk
 
-from humanPredict import (
-    DurationTracker,
-    HRCallInAnalyzer,
-    MarkovChainPredictor,
+from mood_engine import (
+    EMOTION_PRESETS,
+    LOW_MOOD_THRESHOLD,
+    SLEEP_QUALITIES,
+    MoodPatternAnalyzer,
     day_of_week_label,
-    decode_state,
-    entry_to_state,
-    format_duration,
-    is_hr_activity,
     time_of_day_bucket,
 )
 from pdf_export import write_text_pdf
 
 
 def app_dir() -> Path:
-    """Folder for logs/settings. Next to the .exe when frozen; else project folder."""
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
 
 
-LOG_PATH = app_dir() / "hr_pattern_log.json"
-SETTINGS_PATH = app_dir() / "hr_settings.json"
-HR_ACTIVITY = "HR call-in"
-PRESETS = [
-    "HR call-in",
-    "Manager talk",
-    "Write-up",
-    "Warning",
-    "Deadline",
-    "Meeting",
-    "Complaint",
-    "Normal day",
-]
-BEFORE_HR_CHOICES = [
-    "Deadline",
-    "Complaint",
-    "Manager talk",
-    "Write-up",
-    "Warning",
-    "Meeting",
-    "Normal day",
-    "Other / skip",
-]
+LOG_PATH = app_dir() / "mood_log.json"
+SETTINGS_PATH = app_dir() / "mood_settings.json"
 
 # Palette from stephenv.net
 BG = "#000000"
@@ -73,8 +51,6 @@ FONT_SMALL = ("Segoe UI", 9)
 
 
 class ToolTip:
-    """Hover tip for explaining controls."""
-
     def __init__(self, widget, text: str, delay_ms: int = 450):
         self.widget = widget
         self.text = text
@@ -85,7 +61,7 @@ class ToolTip:
         widget.bind("<Leave>", self._hide, add="+")
         widget.bind("<ButtonPress>", self._hide, add="+")
 
-    def _schedule(self, _event=None):
+    def _schedule(self, _e=None):
         self._cancel()
         self._after_id = self.widget.after(self.delay_ms, self._show)
 
@@ -120,7 +96,7 @@ class ToolTip:
             wraplength=320,
         ).pack()
 
-    def _hide(self, _event=None):
+    def _hide(self, _e=None):
         self._cancel()
         if self._tip is not None:
             self._tip.destroy()
@@ -133,100 +109,92 @@ def now_defaults() -> tuple[str, str]:
 
 
 def normalize_entry(raw) -> dict | None:
-    if isinstance(raw, str):
-        activity = raw.strip()
-        if not activity:
-            return None
-        return {
-            "activity": activity,
-            "started_at": None,
-            "duration_min": None,
-            "notes": "",
-            "person": "",
-            "workplace": "",
-        }
     if not isinstance(raw, dict):
         return None
-    activity = str(raw.get("activity", "")).strip()
-    if not activity:
+    try:
+        mood = int(float(raw.get("mood")))
+    except (TypeError, ValueError):
         return None
-    duration = raw.get("duration_min")
-    if duration is not None:
-        try:
-            duration = int(duration)
-        except (TypeError, ValueError):
-            duration = None
+    mood = max(1, min(10, mood))
+    emotions = raw.get("emotions") or []
+    if isinstance(emotions, str):
+        emotions = [e.strip() for e in emotions.split(",") if e.strip()]
+    emotions = [str(e).strip().lower() for e in emotions if str(e).strip()]
+    sleep_hours = raw.get("sleep_hours")
+    try:
+        sleep_hours = float(sleep_hours) if sleep_hours is not None else None
+    except (TypeError, ValueError):
+        sleep_hours = None
     return {
-        "activity": activity,
         "started_at": raw.get("started_at"),
-        "duration_min": duration,
-        "notes": str(raw.get("notes") or ""),
-        "person": str(raw.get("person") or ""),
-        "workplace": str(raw.get("workplace") or ""),
+        "mood": mood,
+        "emotions": emotions,
+        "sleep_hours": sleep_hours,
+        "sleep_quality": str(raw.get("sleep_quality") or "").strip().lower(),
+        "food": str(raw.get("food") or "").strip(),
+        "ate_with": str(raw.get("ate_with") or "").strip(),
+        "talked_to": str(raw.get("talked_to") or "").strip(),
+        "talked_about": str(raw.get("talked_about") or "").strip(),
+        "events": str(raw.get("events") or "").strip(),
+        "location": str(raw.get("location") or "").strip(),
+        "thoughts": str(raw.get("thoughts") or "").strip(),
+        "notes": str(raw.get("notes") or "").strip(),
     }
 
 
 def format_entry_line(index: int, entry: dict) -> str:
-    activity = entry["activity"]
-    duration = format_duration(entry.get("duration_min"))
-    notes = (entry.get("notes") or "").strip().replace("\n", " ")
-    note_bit = ""
-    if notes:
-        preview = notes if len(notes) <= 28 else notes[:25] + "..."
-        note_bit = f"  ·  note: {preview}"
-    who = (entry.get("person") or "").strip()
-    where = (entry.get("workplace") or "").strip()
-    who_bit = ""
-    if who or where:
-        who_bit = f"  ·  {who or '?'} @ {where or '?'}"
-    started_at = entry.get("started_at")
-    if not started_at:
-        return f"{index}. {activity}  ·  {duration}{who_bit}{note_bit}"
+    mood = entry.get("mood", "?")
+    low = ""
     try:
-        dt = datetime.fromisoformat(started_at)
-        when = f"{day_of_week_label(dt)} {dt.strftime('%Y-%m-%d %H:%M')}"
-        bucket = time_of_day_bucket(dt.hour)
-        marker = " ★" if is_hr_activity(activity) else ""
-        return (
-            f"{index}. {when}  ·  {activity}{marker}  ·  {duration}  ·  "
-            f"{bucket}{who_bit}{note_bit}"
-        )
+        if float(mood) <= LOW_MOOD_THRESHOLD:
+            low = " ★"
     except (TypeError, ValueError):
-        return f"{index}. {activity}  ·  {duration}{who_bit}{note_bit}"
+        pass
+    emos = ",".join(entry.get("emotions") or [])[:24]
+    emo_bit = f"  ·  {emos}" if emos else ""
+    loc = entry.get("location") or ""
+    loc_bit = f"  ·  {loc}" if loc else ""
+    started = entry.get("started_at")
+    if not started:
+        return f"{index}. mood {mood}/10{low}{emo_bit}{loc_bit}"
+    try:
+        dt = datetime.fromisoformat(started)
+        when = f"{day_of_week_label(dt)} {dt.strftime('%Y-%m-%d %H:%M')}"
+        return f"{index}. {when}  ·  mood {mood}/10{low}{emo_bit}{loc_bit}"
+    except ValueError:
+        return f"{index}. mood {mood}/10{low}{emo_bit}{loc_bit}"
 
 
-class ActivityLoggerApp(tk.Tk):
+class MoodMinderApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("HumanPredict — HR Call-In Patterns")
-        self.geometry("760x980")
-        self.minsize(680, 820)
+        self.title("Mood Minder")
+        self.geometry("780x1000")
+        self.minsize(700, 840)
         self.configure(bg=BG)
 
         self.entries: list[dict] = []
         self._view_indices: list[int] = []
+        self._corr_indices: list[int] = []
         self._selected_index: int | None = None
-        self._notes_placeholder = True
         self._reminder_job = None
+        self.emotion_vars: dict[str, tk.BooleanVar] = {}
         self.settings = self._load_settings()
-        self.analyzer = HRCallInAnalyzer(target_activity=HR_ACTIVITY)
+        self.analyzer = MoodPatternAnalyzer()
 
         self._apply_theme()
         self._build_ui()
         self._load_log()
         self._sync_day_label()
-        self.refresh_estimate(show_reminder_popup=True)
+        self.refresh_insights(show_reminder_popup=True)
         self._schedule_reminder_check()
 
-    # --- settings ---
     def _default_settings(self) -> dict:
         return {
             "person": "",
-            "workplace": "",
             "reminders_enabled": True,
-            "reminder_within_days": 3,
             "last_reminder_key": "",
-            "hr_only_filter": False,
+            "low_only_filter": False,
         }
 
     def _load_settings(self) -> dict:
@@ -242,22 +210,19 @@ class ActivityLoggerApp(tk.Tk):
 
     def _save_settings(self):
         self.settings["person"] = self.person_var.get().strip()
-        self.settings["workplace"] = self.workplace_var.get().strip()
         self.settings["reminders_enabled"] = bool(self.reminders_var.get())
-        self.settings["hr_only_filter"] = bool(self.hr_only_var.get())
+        self.settings["low_only_filter"] = bool(self.low_only_var.get())
         try:
             SETTINGS_PATH.write_text(json.dumps(self.settings, indent=2), encoding="utf-8")
         except OSError:
             pass
 
-    # --- theme ---
     def _apply_theme(self):
         style = ttk.Style(self)
         try:
             style.theme_use("clam")
         except tk.TclError:
             pass
-
         style.configure(".", background=BG, foreground=TEXT, font=FONT, borderwidth=0)
         style.configure("TFrame", background=BG)
         style.configure("Panel.TFrame", background=PANEL)
@@ -295,7 +260,7 @@ class ActivityLoggerApp(tk.Tk):
             darkcolor=ACCENT,
             padding=6,
         )
-        style.map("TEntry", fieldbackground=[("focus", SURFACE)], bordercolor=[("focus", ACCENT)])
+        style.map("TEntry", fieldbackground=[("focus", SURFACE)])
         style.configure(
             "TSpinbox",
             fieldbackground=INPUT_BG,
@@ -312,13 +277,17 @@ class ActivityLoggerApp(tk.Tk):
             arrowcolor=[("!disabled", TEXT)],
         )
         style.configure(
-            "TCheckbutton",
-            background=BG,
+            "TCombobox",
+            fieldbackground=INPUT_BG,
             foreground=TEXT,
-            font=FONT_SMALL,
-            focuscolor=ACCENT,
+            bordercolor=ACCENT,
+            arrowsize=12,
         )
-        style.map("TCheckbutton", background=[("active", BG)])
+        style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", INPUT_BG)],
+            foreground=[("readonly", TEXT)],
+        )
         style.configure(
             "Panel.TCheckbutton",
             background=PANEL,
@@ -327,35 +296,51 @@ class ActivityLoggerApp(tk.Tk):
             focuscolor=ACCENT,
         )
         style.map("Panel.TCheckbutton", background=[("active", PANEL)])
-        for name, pad in (
-            ("Primary.TButton", (14, 8)),
-            ("Ghost.TButton", (10, 6)),
-            ("Preset.TButton", (8, 5)),
-        ):
-            style.configure(
-                name,
-                background=PRIMARY_BG if "Primary" in name else (PANEL if "Preset" in name else SURFACE),
-                foreground=PRIMARY_FG if "Primary" in name else TEXT,
-                font=FONT_BOLD if "Primary" in name else (FONT_SMALL if "Preset" in name else FONT),
-                borderwidth=0 if "Primary" in name else 1,
-                bordercolor=ACCENT,
-                padding=pad,
-                focuscolor=ACCENT,
-            )
+        style.configure(
+            "TCheckbutton",
+            background=BG,
+            foreground=TEXT,
+            font=FONT_SMALL,
+            focuscolor=ACCENT,
+        )
+        style.configure(
+            "Primary.TButton",
+            background=PRIMARY_BG,
+            foreground=PRIMARY_FG,
+            font=FONT_BOLD,
+            borderwidth=0,
+            padding=(14, 8),
+        )
         style.map(
             "Primary.TButton",
             background=[("active", MUTED), ("pressed", ACCENT)],
-            foreground=[("active", PRIMARY_FG), ("pressed", TEXT)],
+            foreground=[("pressed", TEXT)],
+        )
+        style.configure(
+            "Ghost.TButton",
+            background=SURFACE,
+            foreground=TEXT,
+            font=FONT,
+            borderwidth=1,
+            bordercolor=ACCENT,
+            padding=(10, 6),
         )
         style.map(
             "Ghost.TButton",
             background=[("active", PANEL), ("pressed", ACCENT)],
-            foreground=[("active", TEXT), ("pressed", TEXT)],
+        )
+        style.configure(
+            "Preset.TButton",
+            background=PANEL,
+            foreground=TEXT,
+            font=FONT_SMALL,
+            borderwidth=1,
+            bordercolor=ACCENT,
+            padding=(6, 4),
         )
         style.map(
             "Preset.TButton",
-            background=[("active", ACCENT), ("pressed", PRIMARY_BG)],
-            foreground=[("active", TEXT), ("pressed", PRIMARY_FG)],
+            background=[("active", ACCENT)],
         )
         style.configure(
             "Vertical.TScrollbar",
@@ -367,8 +352,6 @@ class ActivityLoggerApp(tk.Tk):
 
     def _build_ui(self):
         pad = {"padx": 14, "pady": 6}
-
-        # Scrollable shell for the denser UI
         shell = ttk.Frame(self, style="TFrame")
         shell.pack(fill="both", expand=True)
         canvas = tk.Canvas(shell, bg=BG, highlightthickness=0, borderwidth=0)
@@ -393,97 +376,126 @@ class ActivityLoggerApp(tk.Tk):
 
         canvas.bind_all("<MouseWheel>", _wheel)
 
-        # Brand / help
+        # Brand
         brand = ttk.Frame(root, style="TFrame")
         brand.pack(fill="x", **pad)
         title_row = ttk.Frame(brand, style="TFrame")
         title_row.pack(fill="x")
-        ttk.Label(title_row, text="HumanPredict", style="Title.TLabel").pack(side="left")
+        ttk.Label(title_row, text="Mood Minder", style="Title.TLabel").pack(side="left")
         help_btn = ttk.Button(title_row, text="Help", style="Ghost.TButton", command=self.show_help)
         help_btn.pack(side="right")
-        ToolTip(help_btn, "Guide to every feature in this app.")
+        ToolTip(help_btn, "How Mood Minder works and important disclaimers.")
         ttk.Label(
             brand,
-            text="HR call-in tracker — hover controls for tips. Scroll for chart & notes.",
+            text="Track mood, sleep, food, people, events, location, and thoughts — "
+            "then see what correlates with low days. Hover controls for tips.",
             style="Muted.TLabel",
-            wraplength=700,
+            wraplength=720,
         ).pack(anchor="w", pady=(2, 0))
 
         # Profile
-        profile = ttk.LabelFrame(root, text="Who / where", style="Card.TLabelframe")
+        profile = ttk.LabelFrame(root, text="Profile", style="Card.TLabelframe")
         profile.pack(fill="x", **pad)
-        prow = ttk.Frame(profile, style="Panel.TFrame")
-        prow.pack(fill="x")
         self.person_var = tk.StringVar(value=self.settings.get("person", ""))
-        self.workplace_var = tk.StringVar(value=self.settings.get("workplace", ""))
-        pcol = ttk.Frame(prow, style="Panel.TFrame")
-        pcol.pack(side="left", fill="x", expand=True, padx=(0, 8))
-        ttk.Label(pcol, text="Person", style="PanelMuted.TLabel").pack(anchor="w")
-        person_entry = ttk.Entry(pcol, textvariable=self.person_var)
+        ttk.Label(profile, text="Your name (optional)", style="PanelMuted.TLabel").pack(anchor="w")
+        person_entry = ttk.Entry(profile, textvariable=self.person_var)
         person_entry.pack(fill="x", pady=(2, 0))
-        ToolTip(person_entry, "Who this log is about (e.g. granddaughter’s name). Saved on each event.")
-        wcol = ttk.Frame(prow, style="Panel.TFrame")
-        wcol.pack(side="left", fill="x", expand=True)
-        ttk.Label(wcol, text="Workplace", style="PanelMuted.TLabel").pack(anchor="w")
-        work_entry = ttk.Entry(wcol, textvariable=self.workplace_var)
-        work_entry.pack(fill="x", pady=(2, 0))
-        ToolTip(work_entry, "Employer or location label for this pattern log.")
         person_entry.bind("<FocusOut>", lambda _e: self._save_settings())
-        work_entry.bind("<FocusOut>", lambda _e: self._save_settings())
+        ToolTip(person_entry, "Optional label stored with your journal.")
 
-        # Log event
-        add_frame = ttk.LabelFrame(root, text="Log / edit event", style="Card.TLabelframe")
-        add_frame.pack(fill="x", **pad)
+        # Check-in
+        check = ttk.LabelFrame(root, text="Daily check-in", style="Card.TLabelframe")
+        check.pack(fill="x", **pad)
 
         date_default, time_default = now_defaults()
-        self.activity_var = tk.StringVar(value=HR_ACTIVITY)
         self.date_var = tk.StringVar(value=date_default)
         self.time_var = tk.StringVar(value=time_default)
-        self.duration_var = tk.IntVar(value=30)
         self.day_var = tk.StringVar(value="")
+        self.mood_var = tk.IntVar(value=5)
+        self.sleep_hours_var = tk.DoubleVar(value=7.0)
+        self.sleep_quality_var = tk.StringVar(value="fair")
+        self.food_var = tk.StringVar()
+        self.ate_with_var = tk.StringVar()
+        self.talked_to_var = tk.StringVar()
+        self.talked_about_var = tk.StringVar()
+        self.events_var = tk.StringVar()
+        self.location_var = tk.StringVar()
 
-        row1 = ttk.Frame(add_frame, style="Panel.TFrame")
-        row1.pack(fill="x", pady=(0, 6))
-        ttk.Label(row1, text="Event", style="PanelMuted.TLabel").pack(anchor="w")
-        entry = ttk.Entry(row1, textvariable=self.activity_var)
-        entry.pack(fill="x", pady=(2, 0))
-        ToolTip(entry, "What happened. Use HR call-in for HR department meetings.")
-
-        row2 = ttk.Frame(add_frame, style="Panel.TFrame")
-        row2.pack(fill="x", pady=(0, 6))
-        date_col = ttk.Frame(row2, style="Panel.TFrame")
-        date_col.pack(side="left", fill="x", expand=True, padx=(0, 6))
-        ttk.Label(date_col, text="Date (YYYY-MM-DD)", style="PanelMuted.TLabel").pack(anchor="w")
-        date_entry = ttk.Entry(date_col, textvariable=self.date_var, width=14)
-        date_entry.pack(fill="x", pady=(2, 0))
-        date_entry.bind("<KeyRelease>", lambda _e: self._sync_day_label())
-        ToolTip(date_entry, "Event date — drives gap estimates between HR call-ins.")
-
-        time_col = ttk.Frame(row2, style="Panel.TFrame")
-        time_col.pack(side="left", fill="x", expand=True, padx=(0, 6))
-        ttk.Label(time_col, text="Time (HH:MM)", style="PanelMuted.TLabel").pack(anchor="w")
-        time_entry = ttk.Entry(time_col, textvariable=self.time_var, width=10)
-        time_entry.pack(fill="x", pady=(2, 0))
-        time_entry.bind("<KeyRelease>", lambda _e: self._sync_day_label())
-        ToolTip(time_entry, "Event time (24-hour).")
-
-        day_col = ttk.Frame(row2, style="Panel.TFrame")
+        row = ttk.Frame(check, style="Panel.TFrame")
+        row.pack(fill="x", pady=(0, 6))
+        for label, var, width, tip in (
+            ("Date", self.date_var, 12, "YYYY-MM-DD"),
+            ("Time", self.time_var, 8, "HH:MM"),
+        ):
+            col = ttk.Frame(row, style="Panel.TFrame")
+            col.pack(side="left", fill="x", expand=True, padx=(0, 6))
+            ttk.Label(col, text=label, style="PanelMuted.TLabel").pack(anchor="w")
+            e = ttk.Entry(col, textvariable=var, width=width)
+            e.pack(fill="x", pady=(2, 0))
+            e.bind("<KeyRelease>", lambda _e: self._sync_day_label())
+            ToolTip(e, tip)
+        day_col = ttk.Frame(row, style="Panel.TFrame")
         day_col.pack(side="left", fill="x", expand=True, padx=(0, 6))
         ttk.Label(day_col, text="Day", style="PanelMuted.TLabel").pack(anchor="w")
-        ttk.Label(day_col, textvariable=self.day_var, style="Panel.TLabel").pack(anchor="w", pady=(4, 0))
+        ttk.Label(day_col, textvariable=self.day_var, style="Panel.TLabel").pack(
+            anchor="w", pady=(4, 0)
+        )
+        mood_col = ttk.Frame(row, style="Panel.TFrame")
+        mood_col.pack(side="left", fill="x", expand=True)
+        ttk.Label(mood_col, text="Mood (1–10)", style="PanelMuted.TLabel").pack(anchor="w")
+        mood_spin = ttk.Spinbox(mood_col, from_=1, to=10, width=6, textvariable=self.mood_var)
+        mood_spin.pack(fill="x", pady=(2, 0))
+        ToolTip(mood_spin, "1 = very low / depressed · 10 = excellent")
 
-        dur_col = ttk.Frame(row2, style="Panel.TFrame")
-        dur_col.pack(side="left", fill="x", expand=True)
-        ttk.Label(dur_col, text="Duration (min)", style="PanelMuted.TLabel").pack(anchor="w")
-        dur_spin = ttk.Spinbox(dur_col, from_=1, to=24 * 60, width=8, textvariable=self.duration_var)
-        dur_spin.pack(fill="x", pady=(2, 0))
-        ToolTip(dur_spin, "How long it lasted, in minutes.")
+        # Emotions
+        ttk.Label(check, text="Emotions", style="PanelMuted.TLabel").pack(anchor="w")
+        emo_row = ttk.Frame(check, style="Panel.TFrame")
+        emo_row.pack(fill="x", pady=(2, 6))
+        for i, name in enumerate(EMOTION_PRESETS):
+            var = tk.BooleanVar(value=False)
+            self.emotion_vars[name] = var
+            cb = ttk.Checkbutton(
+                emo_row, text=name, variable=var, style="Panel.TCheckbutton"
+            )
+            cb.grid(row=i // 5, column=i % 5, sticky="w", padx=4, pady=2)
 
-        notes_new = ttk.Frame(add_frame, style="Panel.TFrame")
-        notes_new.pack(fill="x", pady=(0, 6))
-        ttk.Label(notes_new, text="Notes for this event", style="PanelMuted.TLabel").pack(anchor="w")
-        self.new_notes_text = tk.Text(
-            notes_new,
+        row2 = ttk.Frame(check, style="Panel.TFrame")
+        row2.pack(fill="x", pady=(0, 6))
+        sh = ttk.Frame(row2, style="Panel.TFrame")
+        sh.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        ttk.Label(sh, text="Sleep hours", style="PanelMuted.TLabel").pack(anchor="w")
+        ttk.Spinbox(
+            sh, from_=0, to=24, increment=0.5, width=6, textvariable=self.sleep_hours_var
+        ).pack(fill="x", pady=(2, 0))
+        sq = ttk.Frame(row2, style="Panel.TFrame")
+        sq.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        ttk.Label(sq, text="Sleep quality", style="PanelMuted.TLabel").pack(anchor="w")
+        ttk.Combobox(
+            sq,
+            values=SLEEP_QUALITIES,
+            textvariable=self.sleep_quality_var,
+            state="readonly",
+        ).pack(fill="x", pady=(2, 0))
+        loc = ttk.Frame(row2, style="Panel.TFrame")
+        loc.pack(side="left", fill="x", expand=True)
+        ttk.Label(loc, text="Location", style="PanelMuted.TLabel").pack(anchor="w")
+        ttk.Entry(loc, textvariable=self.location_var).pack(fill="x", pady=(2, 0))
+
+        for label, var, tip in (
+            ("Food (what you ate)", self.food_var, "Comma-separated foods or meals"),
+            ("Ate with", self.ate_with_var, "alone, partner, friends, family…"),
+            ("Talked to", self.talked_to_var, "Who you spoke with"),
+            ("Talked about", self.talked_about_var, "Topics, comma-separated"),
+            ("Events", self.events_var, "Day events, comma-separated"),
+        ):
+            ttk.Label(check, text=label, style="PanelMuted.TLabel").pack(anchor="w")
+            e = ttk.Entry(check, textvariable=var)
+            e.pack(fill="x", pady=(2, 6))
+            ToolTip(e, tip)
+
+        ttk.Label(check, text="Thoughts", style="PanelMuted.TLabel").pack(anchor="w")
+        self.thoughts_text = tk.Text(
+            check,
             height=3,
             wrap="word",
             bg=INPUT_BG,
@@ -491,174 +503,136 @@ class ActivityLoggerApp(tk.Tk):
             insertbackground=TEXT,
             highlightthickness=1,
             highlightbackground=ACCENT,
-            highlightcolor=ACCENT,
             borderwidth=0,
             font=FONT_SMALL,
-            relief="flat",
             padx=8,
             pady=6,
         )
-        self.new_notes_text.pack(fill="x", pady=(2, 0))
-        self._reset_new_notes()
-        self.new_notes_text.bind("<FocusIn>", self._clear_notes_placeholder)
-        ToolTip(self.new_notes_text, "Details: who called, what was said, outcome.")
+        self.thoughts_text.pack(fill="x", pady=(2, 6))
+        ToolTip(self.thoughts_text, "What you were thinking about today.")
 
-        row3 = ttk.Frame(add_frame, style="Panel.TFrame")
-        row3.pack(fill="x")
-        use_now_btn = ttk.Button(row3, text="Use now", style="Ghost.TButton", command=self._use_now)
-        use_now_btn.pack(side="left")
-        ToolTip(use_now_btn, "Fill date/time with now.")
-        clear_form_btn = ttk.Button(
-            row3, text="New entry", style="Ghost.TButton", command=self.clear_form
+        btns = ttk.Frame(check, style="Panel.TFrame")
+        btns.pack(fill="x")
+        ttk.Button(btns, text="Use now", style="Ghost.TButton", command=self._use_now).pack(
+            side="left"
         )
-        clear_form_btn.pack(side="left", padx=(6, 0))
-        ToolTip(clear_form_btn, "Clear the form to add a brand-new event (exit edit mode).")
+        ttk.Button(btns, text="New entry", style="Ghost.TButton", command=self.clear_form).pack(
+            side="left", padx=(6, 0)
+        )
+        ttk.Button(
+            btns, text="Save check-in", style="Primary.TButton", command=self.add_checkin
+        ).pack(side="right", padx=(8, 0))
+        ttk.Button(
+            btns, text="Update selected", style="Ghost.TButton", command=self.update_selected
+        ).pack(side="right")
 
-        log_hr_btn = ttk.Button(
-            row3,
-            text="Log HR call-in",
-            style="Primary.TButton",
-            command=lambda: self.add_activity(HR_ACTIVITY),
-        )
-        log_hr_btn.pack(side="right", padx=(8, 0))
-        ToolTip(log_hr_btn, "Save an HR call-in. You’ll be asked what happened before it.")
-        self.update_btn = ttk.Button(
-            row3, text="Update selected", style="Ghost.TButton", command=self.update_selected
-        )
-        self.update_btn.pack(side="right", padx=(8, 0))
-        ToolTip(self.update_btn, "Save changes to the event selected in the log.")
-        add_btn = ttk.Button(row3, text="Add event", style="Ghost.TButton", command=self.add_activity)
-        add_btn.pack(side="right")
-        ToolTip(add_btn, "Add a new event using the Event name above.")
-
-        presets = ttk.Frame(root, style="TFrame")
-        presets.pack(fill="x", padx=14, pady=(0, 4))
-        tips = {
-            "HR call-in": "Called into HR.",
-            "Manager talk": "Talk with a manager.",
-            "Write-up": "Formal write-up.",
-            "Warning": "Verbal/informal warning.",
-            "Deadline": "Work deadline.",
-            "Meeting": "Other meeting.",
-            "Complaint": "A complaint was involved.",
-            "Normal day": "Ordinary day.",
-        }
-        for name in PRESETS:
-            btn = ttk.Button(
-                presets,
-                text=name,
-                style="Preset.TButton",
-                command=lambda n=name: self._set_preset(n),
-            )
-            btn.pack(side="left", padx=(0, 6), pady=2)
-            ToolTip(btn, tips.get(name, name))
-
-        # Estimate
-        est_frame = ttk.LabelFrame(root, text="Next HR call-in estimate", style="Card.TLabelframe")
-        est_frame.pack(fill="x", **pad)
-        est_btns = ttk.Frame(est_frame, style="Panel.TFrame")
-        est_btns.pack(fill="x")
-        estimate_btn = ttk.Button(
-            est_btns,
-            text="Estimate next HR call-in",
-            style="Primary.TButton",
-            command=lambda: self.refresh_estimate(show_reminder_popup=True),
-        )
-        estimate_btn.pack(side="left")
-        ToolTip(estimate_btn, "Estimate from gaps between past HR dates. Needs 2+ HR entries.")
-        sequence_btn = ttk.Button(
-            est_btns, text="Sequence forecast", style="Ghost.TButton", command=self.predict_sequence
-        )
-        sequence_btn.pack(side="left", padx=(8, 0))
-        ToolTip(sequence_btn, "Guess the next event type from recent order.")
-        self.reminders_var = tk.BooleanVar(value=bool(self.settings.get("reminders_enabled", True)))
-        rem_chk = ttk.Checkbutton(
-            est_btns,
-            text="Reminders",
-            variable=self.reminders_var,
-            style="Panel.TCheckbutton",
-            command=self._save_settings,
-        )
-        rem_chk.pack(side="right")
-        ToolTip(rem_chk, "Pop up when the estimated HR window is within 3 days or overdue.")
-
-        self.confidence_var = tk.StringVar(value="Confidence: No data")
-        self.confidence_label = ttk.Label(
-            est_frame, textvariable=self.confidence_var, style="PanelMuted.TLabel"
-        )
-        self.confidence_label.pack(anchor="w", pady=(8, 0))
-
-        self.reminder_var = tk.StringVar(value="")
-        self.reminder_label = ttk.Label(
-            est_frame, textvariable=self.reminder_var, style="Warn.TLabel", wraplength=700
-        )
-        self.reminder_label.pack(anchor="w", pady=(4, 0))
-
-        self.result_var = tk.StringVar(
-            value="Log two or more HR call-ins with dates to estimate the next one."
-        )
-        ttk.Label(
-            est_frame, textvariable=self.result_var, style="Result.TLabel", wraplength=700
-        ).pack(anchor="w", pady=(8, 6))
-
-        self.dist_text = tk.Text(
-            est_frame,
+        # Why this mood
+        why = ttk.LabelFrame(root, text="Why this mood", style="Card.TLabelframe")
+        why.pack(fill="x", **pad)
+        self.why_text = tk.Text(
+            why,
             height=7,
             wrap="word",
             state="disabled",
             bg=INPUT_BG,
             fg=TEXT,
-            insertbackground=TEXT,
             highlightthickness=1,
             highlightbackground=ACCENT,
-            highlightcolor=ACCENT,
             borderwidth=0,
             font=FONT_SMALL,
-            relief="flat",
             padx=8,
             pady=6,
         )
-        self.dist_text.pack(fill="x")
-
-        # Chart
-        chart_frame = ttk.LabelFrame(
-            root, text="Pattern chart (gaps + weekdays)", style="Card.TLabelframe"
+        self.why_text.pack(fill="x")
+        ToolTip(
+            self.why_text,
+            "Plain-language explanation based on your past low-mood patterns.",
         )
-        chart_frame.pack(fill="x", **pad)
+
+        # Insights
+        insights = ttk.LabelFrame(root, text="Insights", style="Card.TLabelframe")
+        insights.pack(fill="x", **pad)
+        ib = ttk.Frame(insights, style="Panel.TFrame")
+        ib.pack(fill="x")
+        ttk.Button(
+            ib,
+            text="Refresh insights",
+            style="Primary.TButton",
+            command=lambda: self.refresh_insights(show_reminder_popup=True),
+        ).pack(side="left")
+        self.reminders_var = tk.BooleanVar(
+            value=bool(self.settings.get("reminders_enabled", True))
+        )
+        ttk.Checkbutton(
+            ib,
+            text="Reminders",
+            variable=self.reminders_var,
+            style="Panel.TCheckbutton",
+            command=self._save_settings,
+        ).pack(side="right")
+
+        self.confidence_var = tk.StringVar(value="Confidence: No data")
+        self.confidence_label = ttk.Label(
+            insights, textvariable=self.confidence_var, style="PanelMuted.TLabel"
+        )
+        self.confidence_label.pack(anchor="w", pady=(8, 0))
+        self.reminder_var = tk.StringVar(value="")
+        self.reminder_label = ttk.Label(
+            insights, textvariable=self.reminder_var, style="Warn.TLabel", wraplength=720
+        )
+        self.reminder_label.pack(anchor="w", pady=(4, 0))
+        self.result_var = tk.StringVar(value="Log check-ins to see 7-day and 30-day patterns.")
+        ttk.Label(
+            insights, textvariable=self.result_var, style="Result.TLabel", wraplength=720
+        ).pack(anchor="w", pady=(6, 4))
+        self.insights_detail = tk.Text(
+            insights,
+            height=5,
+            wrap="word",
+            state="disabled",
+            bg=INPUT_BG,
+            fg=TEXT,
+            highlightthickness=1,
+            highlightbackground=ACCENT,
+            borderwidth=0,
+            font=FONT_SMALL,
+            padx=8,
+            pady=6,
+        )
+        self.insights_detail.pack(fill="x")
+
+        # Charts
+        charts = ttk.LabelFrame(
+            root, text="Charts — mood · sleep · emotions · correlates", style="Card.TLabelframe"
+        )
+        charts.pack(fill="x", **pad)
         self.chart_canvas = tk.Canvas(
-            chart_frame,
-            height=150,
+            charts,
+            height=220,
             bg=INPUT_BG,
             highlightthickness=1,
             highlightbackground=ACCENT,
             borderwidth=0,
         )
         self.chart_canvas.pack(fill="x")
-        ToolTip(self.chart_canvas, "Left: days between HR call-ins. Right: which weekdays HR happens on.")
-
-        # Log list
-        list_frame = ttk.LabelFrame(
-            root, text="Event log  ·  oldest → newest  ·  ★ = HR", style="Card.TLabelframe"
+        ToolTip(
+            self.chart_canvas,
+            "Top: mood over time (★ low days). Bottom-left: sleep vs mood. "
+            "Bottom-mid: emotions on low days. Bottom-right: factor probabilities.",
         )
-        list_frame.pack(fill="both", expand=True, **pad)
-        filter_row = ttk.Frame(list_frame, style="Panel.TFrame")
-        filter_row.pack(fill="x", pady=(0, 6))
-        self.hr_only_var = tk.BooleanVar(value=bool(self.settings.get("hr_only_filter", False)))
-        hr_chk = ttk.Checkbutton(
-            filter_row,
-            text="Show HR call-ins only",
-            variable=self.hr_only_var,
-            style="Panel.TCheckbutton",
-            command=self._on_filter_changed,
-        )
-        hr_chk.pack(side="left")
-        ToolTip(hr_chk, "Hide non-HR events in the list. Full log is still used for estimates.")
 
-        list_inner = ttk.Frame(list_frame, style="Panel.TFrame")
-        list_inner.pack(fill="both", expand=True)
-        self.listbox = tk.Listbox(
-            list_inner,
-            height=8,
+        # Depression correlation log
+        corr = ttk.LabelFrame(
+            root,
+            text="Depression correlation log  ·  low mood (≤4) with probabilities",
+            style="Card.TLabelframe",
+        )
+        corr.pack(fill="x", **pad)
+        corr_inner = ttk.Frame(corr, style="Panel.TFrame")
+        corr_inner.pack(fill="both", expand=True)
+        self.corr_list = tk.Listbox(
+            corr_inner,
+            height=6,
             bg=INPUT_BG,
             fg=TEXT,
             selectbackground=ACCENT,
@@ -666,119 +640,114 @@ class ActivityLoggerApp(tk.Tk):
             activestyle="none",
             highlightthickness=1,
             highlightbackground=ACCENT,
-            highlightcolor=ACCENT,
             borderwidth=0,
             font=FONT_SMALL,
-            relief="flat",
         )
-        lb_scroll = ttk.Scrollbar(list_inner, orient="vertical", command=self.listbox.yview)
-        self.listbox.configure(yscrollcommand=lb_scroll.set)
+        cs = ttk.Scrollbar(corr_inner, orient="vertical", command=self.corr_list.yview)
+        self.corr_list.configure(yscrollcommand=cs.set)
+        self.corr_list.pack(side="left", fill="both", expand=True)
+        cs.pack(side="right", fill="y", padx=(6, 0))
+        self.corr_list.bind("<<ListboxSelect>>", self._on_corr_selected)
+        ToolTip(
+            self.corr_list,
+            "Each low-mood day with linked factors and how often those factors "
+            "appear on low days. Click to load and see full explanation.",
+        )
+
+        # Full log
+        logf = ttk.LabelFrame(
+            root, text="Full check-in log  ·  ★ = low mood", style="Card.TLabelframe"
+        )
+        logf.pack(fill="both", expand=True, **pad)
+        fr = ttk.Frame(logf, style="Panel.TFrame")
+        fr.pack(fill="x", pady=(0, 6))
+        self.low_only_var = tk.BooleanVar(
+            value=bool(self.settings.get("low_only_filter", False))
+        )
+        ttk.Checkbutton(
+            fr,
+            text="Show low-mood only",
+            variable=self.low_only_var,
+            style="Panel.TCheckbutton",
+            command=self._on_filter_changed,
+        ).pack(side="left")
+
+        li = ttk.Frame(logf, style="Panel.TFrame")
+        li.pack(fill="both", expand=True)
+        self.listbox = tk.Listbox(
+            li,
+            height=7,
+            bg=INPUT_BG,
+            fg=TEXT,
+            selectbackground=ACCENT,
+            selectforeground=TEXT,
+            activestyle="none",
+            highlightthickness=1,
+            highlightbackground=ACCENT,
+            borderwidth=0,
+            font=FONT_SMALL,
+        )
+        ls = ttk.Scrollbar(li, orient="vertical", command=self.listbox.yview)
+        self.listbox.configure(yscrollcommand=ls.set)
         self.listbox.pack(side="left", fill="both", expand=True)
-        lb_scroll.pack(side="right", fill="y", padx=(6, 0))
+        ls.pack(side="right", fill="y", padx=(6, 0))
         self.listbox.bind("<<ListboxSelect>>", self._on_event_selected)
-        ToolTip(self.listbox, "Click an event to load it into the form for editing.")
 
         btn_row = ttk.Frame(root, style="TFrame")
         btn_row.pack(fill="x", padx=14, pady=(4, 0))
         for text, cmd, tip in (
-            ("Remove selected", self.remove_selected, "Delete the highlighted event."),
-            ("Clear all", self.clear_all, "Erase the entire log."),
-            ("Save PDF", self.print_log, "Save the full log and estimate as a PDF, then optionally print it."),
-            ("Export text", self.export_log_text, "Save report as .txt."),
-            ("Backup JSON", self.backup_json, "Save a full JSON backup of the log."),
+            ("Remove selected", self.remove_selected, "Delete selected check-in"),
+            ("Clear all", self.clear_all, "Erase the journal"),
+            ("Save PDF", self.save_pdf, "Save PDF report, then optionally print"),
+            ("Export text", self.export_text, "Export as .txt"),
+            ("Backup JSON", self.backup_json, "Full JSON backup"),
         ):
             b = ttk.Button(btn_row, text=text, style="Ghost.TButton", command=cmd)
             b.pack(side="left", padx=(0, 6))
             ToolTip(b, tip)
-        save_btn = ttk.Button(btn_row, text="Save", style="Ghost.TButton", command=self.save_log)
-        save_btn.pack(side="right")
-        ToolTip(save_btn, "Write log + settings to disk (also auto-saves).")
-
-        notes_frame = ttk.LabelFrame(
-            root, text="Notes for selected event", style="Card.TLabelframe"
+        ttk.Button(btn_row, text="Save", style="Ghost.TButton", command=self.save_log).pack(
+            side="right"
         )
-        notes_frame.pack(fill="x", **pad)
-        self.selected_event_var = tk.StringVar(
-            value="Select an event to view notes or load it into the edit form."
+
+        notes = ttk.LabelFrame(root, text="Notes for selected check-in", style="Card.TLabelframe")
+        notes.pack(fill="x", **pad)
+        self.selected_label_var = tk.StringVar(
+            value="Select a check-in to view or edit notes."
         )
         ttk.Label(
-            notes_frame,
-            textvariable=self.selected_event_var,
-            style="PanelMuted.TLabel",
-            wraplength=700,
+            notes, textvariable=self.selected_label_var, style="PanelMuted.TLabel", wraplength=720
         ).pack(anchor="w")
         self.selected_notes_text = tk.Text(
-            notes_frame,
-            height=4,
+            notes,
+            height=3,
             wrap="word",
             bg=INPUT_BG,
             fg=TEXT,
             insertbackground=TEXT,
             highlightthickness=1,
             highlightbackground=ACCENT,
-            highlightcolor=ACCENT,
             borderwidth=0,
             font=FONT_SMALL,
-            relief="flat",
             padx=8,
             pady=6,
         )
         self.selected_notes_text.pack(fill="x", pady=(6, 6))
-        save_notes_btn = ttk.Button(
-            notes_frame, text="Save notes", style="Primary.TButton", command=self.save_selected_notes
-        )
-        save_notes_btn.pack(anchor="e")
-        ToolTip(save_notes_btn, "Store notes for the selected event without changing other fields.")
+        ttk.Button(
+            notes, text="Save notes", style="Primary.TButton", command=self.save_selected_notes
+        ).pack(anchor="e")
 
         ttk.Label(
             root,
-            text="Estimates are pattern helpers · not guarantees",
+            text="Personal pattern journal · not a medical diagnosis",
             style="Muted.TLabel",
         ).pack(anchor="e", padx=14, pady=(0, 12))
 
     # --- form helpers ---
-    def _set_preset(self, name: str):
-        self.activity_var.set(name)
-        if is_hr_activity(name):
-            self.duration_var.set(30)
-        elif name == "Normal day":
-            self.duration_var.set(480)
-        else:
-            self.duration_var.set(20)
-
-    def _clear_notes_placeholder(self, _event=None):
-        if self._notes_placeholder:
-            self.new_notes_text.delete("1.0", tk.END)
-            self._notes_placeholder = False
-
-    def _read_new_notes(self) -> str:
-        if self._notes_placeholder:
-            return ""
-        return self.new_notes_text.get("1.0", tk.END).strip()
-
-    def _reset_new_notes(self):
-        self.new_notes_text.delete("1.0", tk.END)
-        self.new_notes_text.insert(
-            "1.0",
-            "Who called her in, what was said, outcome, anything that happened before…",
-        )
-        self._notes_placeholder = True
-
     def _use_now(self):
-        date_s, time_s = now_defaults()
-        self.date_var.set(date_s)
-        self.time_var.set(time_s)
+        d, t = now_defaults()
+        self.date_var.set(d)
+        self.time_var.set(t)
         self._sync_day_label()
-
-    def clear_form(self):
-        self._selected_index = None
-        self.activity_var.set(HR_ACTIVITY)
-        self.duration_var.set(30)
-        self._reset_new_notes()
-        self._use_now()
-        self.listbox.selection_clear(0, tk.END)
-        self.selected_event_var.set("Select an event to view notes or load it into the edit form.")
-        self.selected_notes_text.delete("1.0", tk.END)
 
     def _sync_day_label(self):
         try:
@@ -796,146 +765,109 @@ class ActivityLoggerApp(tk.Tk):
         except ValueError as exc:
             raise ValueError("Use date YYYY-MM-DD and time HH:MM.") from exc
 
-    def _collect_form_entry(self, activity: str | None = None) -> dict:
-        name = (activity if activity is not None else self.activity_var.get()).strip()
-        if not name:
-            raise ValueError("Event name is required.")
+    def _selected_emotions(self) -> list[str]:
+        return [name for name, var in self.emotion_vars.items() if var.get()]
+
+    def _set_emotions(self, emotions: list[str]):
+        wanted = {str(e).strip().lower() for e in emotions}
+        for name, var in self.emotion_vars.items():
+            var.set(name in wanted)
+
+    def clear_form(self):
+        self._selected_index = None
+        self.mood_var.set(5)
+        self.sleep_hours_var.set(7.0)
+        self.sleep_quality_var.set("fair")
+        for var in (
+            self.food_var,
+            self.ate_with_var,
+            self.talked_to_var,
+            self.talked_about_var,
+            self.events_var,
+            self.location_var,
+        ):
+            var.set("")
+        self._set_emotions([])
+        self.thoughts_text.delete("1.0", tk.END)
+        self._use_now()
+        self.listbox.selection_clear(0, tk.END)
+        self.corr_list.selection_clear(0, tk.END)
+        self.selected_label_var.set("Select a check-in to view or edit notes.")
+        self.selected_notes_text.delete("1.0", tk.END)
+        self._set_text(self.why_text, "Save or select a check-in to see an explanation.")
+
+    def _collect_entry(self) -> dict:
         started = self._parse_started_at()
-        duration = int(self.duration_var.get())
-        if duration < 1:
-            raise ValueError("Duration must be at least 1 minute.")
+        mood = int(self.mood_var.get())
+        if mood < 1 or mood > 10:
+            raise ValueError("Mood must be between 1 and 10.")
+        sleep_hours = float(self.sleep_hours_var.get())
         return {
-            "activity": name,
             "started_at": started.isoformat(timespec="minutes"),
-            "duration_min": duration,
-            "notes": self._read_new_notes(),
-            "person": self.person_var.get().strip(),
-            "workplace": self.workplace_var.get().strip(),
+            "mood": mood,
+            "emotions": self._selected_emotions(),
+            "sleep_hours": sleep_hours,
+            "sleep_quality": self.sleep_quality_var.get().strip().lower(),
+            "food": self.food_var.get().strip(),
+            "ate_with": self.ate_with_var.get().strip(),
+            "talked_to": self.talked_to_var.get().strip(),
+            "talked_about": self.talked_about_var.get().strip(),
+            "events": self.events_var.get().strip(),
+            "location": self.location_var.get().strip(),
+            "thoughts": self.thoughts_text.get("1.0", tk.END).strip(),
+            "notes": self.selected_notes_text.get("1.0", tk.END).strip()
+            if self._selected_index is not None
+            else "",
         }
 
-    def _prompt_before_hr(self, hr_started: datetime):
-        choice = simpledialog.askstring(
-            "What happened before HR?",
-            "Optional: log a leading event (helps find warning signs).\n\n"
-            "Type one of:\n  " + ", ".join(BEFORE_HR_CHOICES) + "\n\n"
-            "Or leave blank to skip.",
-            parent=self,
-        )
-        if not choice:
-            return
-        choice = choice.strip()
-        if not choice or choice.lower().startswith("other"):
-            return
-        # Match preset case-insensitively
-        matched = next((p for p in BEFORE_HR_CHOICES[:-1] if p.lower() == choice.lower()), choice)
-        prior = hr_started.timestamp() - 24 * 3600
-        prior_dt = datetime.fromtimestamp(prior)
-        note = simpledialog.askstring(
-            "Before-HR notes",
-            f"Optional notes for “{matched}” the day before HR:",
-            parent=self,
-        )
-        self.entries.append(
-            {
-                "activity": matched,
-                "started_at": prior_dt.isoformat(timespec="minutes"),
-                "duration_min": 30,
-                "notes": (note or "").strip(),
-                "person": self.person_var.get().strip(),
-                "workplace": self.workplace_var.get().strip(),
-            }
-        )
-
-    def add_activity(self, name: str | None = None):
+    def add_checkin(self):
         try:
-            entry = self._collect_form_entry(name)
+            entry = self._collect_entry()
+            entry["notes"] = ""
         except (ValueError, tk.TclError) as exc:
-            messagebox.showerror("Invalid input", str(exc) or "Check the form fields.")
+            messagebox.showerror("Invalid input", str(exc) or "Check the form.")
             return
-
-        if is_hr_activity(entry["activity"]):
-            if messagebox.askyesno(
-                "Before HR checklist",
-                "Log what happened 1 day before this HR call-in?\n\n"
-                "(Deadline, Complaint, Manager talk, etc.)",
-            ):
-                self._prompt_before_hr(datetime.fromisoformat(entry["started_at"]))
-
         self.entries.append(entry)
         self.entries.sort(key=lambda e: e.get("started_at") or "")
-        self._refresh_list()
-        self.clear_form()
+        self._refresh_lists()
         self._autosave()
-        self.refresh_estimate(show_reminder_popup=True)
-        self._select_entry_matching(entry)
+        self.refresh_insights(show_reminder_popup=False)
+        self._select_matching(entry)
+        self._update_why_for(entry)
 
     def update_selected(self):
         if self._selected_index is None:
-            messagebox.showinfo("No event selected", "Click an event in the log first.")
+            messagebox.showinfo("No selection", "Select a check-in in the log first.")
             return
         try:
-            entry = self._collect_form_entry()
+            entry = self._collect_entry()
+            entry["notes"] = self.selected_notes_text.get("1.0", tk.END).strip()
         except (ValueError, tk.TclError) as exc:
-            messagebox.showerror("Invalid input", str(exc) or "Check the form fields.")
+            messagebox.showerror("Invalid input", str(exc) or "Check the form.")
             return
-        # Keep notes from selected notes pane if user edited there more recently
-        pane_notes = self.selected_notes_text.get("1.0", tk.END).strip()
-        if pane_notes and not self._read_new_notes():
-            entry["notes"] = pane_notes
-        elif self._read_new_notes():
-            entry["notes"] = self._read_new_notes()
-        else:
-            entry["notes"] = pane_notes
-
         self.entries[self._selected_index] = entry
         self.entries.sort(key=lambda e: e.get("started_at") or "")
-        # Reselect by identity after sort
-        self._refresh_list()
+        self._refresh_lists()
         self._autosave()
-        self.refresh_estimate(show_reminder_popup=False)
-        self._select_entry_matching(entry)
-        messagebox.showinfo("Updated", "Event updated.")
-
-    def _select_entry_matching(self, entry: dict):
-        for i, item in enumerate(self.entries):
-            if item is entry or (
-                item.get("started_at") == entry.get("started_at")
-                and item.get("activity") == entry.get("activity")
-                and item.get("notes") == entry.get("notes")
-            ):
-                self._selected_index = i
-                # find in view
-                if i in self._view_indices:
-                    view_i = self._view_indices.index(i)
-                    self.listbox.selection_clear(0, tk.END)
-                    self.listbox.selection_set(view_i)
-                    self.listbox.see(view_i)
-                    self._load_entry_into_form(i)
-                break
-
-    def _on_filter_changed(self):
-        self._save_settings()
-        selected = self._selected_index
-        self._refresh_list()
-        if selected is not None and selected in self._view_indices:
-            view_i = self._view_indices.index(selected)
-            self.listbox.selection_set(view_i)
-            self.listbox.see(view_i)
-
-    def _on_event_selected(self, _event=None):
-        selection = self.listbox.curselection()
-        if not selection:
-            return
-        view_i = selection[0]
-        if view_i >= len(self._view_indices):
-            return
-        index = self._view_indices[view_i]
-        self._load_entry_into_form(index)
+        self.refresh_insights(show_reminder_popup=False)
+        self._select_matching(entry)
+        self._update_why_for(entry)
+        messagebox.showinfo("Updated", "Check-in updated.")
 
     def _load_entry_into_form(self, index: int):
         self._selected_index = index
         entry = self.entries[index]
-        self.activity_var.set(entry.get("activity", ""))
+        self.mood_var.set(int(entry.get("mood", 5)))
+        self._set_emotions(entry.get("emotions") or [])
+        if entry.get("sleep_hours") is not None:
+            self.sleep_hours_var.set(float(entry["sleep_hours"]))
+        self.sleep_quality_var.set(entry.get("sleep_quality") or "fair")
+        self.food_var.set(entry.get("food") or "")
+        self.ate_with_var.set(entry.get("ate_with") or "")
+        self.talked_to_var.set(entry.get("talked_to") or "")
+        self.talked_about_var.set(entry.get("talked_about") or "")
+        self.events_var.set(entry.get("events") or "")
+        self.location_var.set(entry.get("location") or "")
         started = entry.get("started_at")
         if started:
             try:
@@ -944,91 +876,145 @@ class ActivityLoggerApp(tk.Tk):
                 self.time_var.set(dt.strftime("%H:%M"))
             except ValueError:
                 pass
-        if entry.get("duration_min") is not None:
-            self.duration_var.set(int(entry["duration_min"]))
-        if entry.get("person"):
-            self.person_var.set(entry["person"])
-        if entry.get("workplace"):
-            self.workplace_var.set(entry["workplace"])
         self._sync_day_label()
-        notes = entry.get("notes") or ""
-        self.new_notes_text.delete("1.0", tk.END)
-        self.new_notes_text.insert("1.0", notes)
-        self._notes_placeholder = False
-        self.selected_event_var.set(format_entry_line(index + 1, entry))
+        self.thoughts_text.delete("1.0", tk.END)
+        self.thoughts_text.insert("1.0", entry.get("thoughts") or "")
+        self.selected_label_var.set(format_entry_line(index + 1, entry))
         self.selected_notes_text.delete("1.0", tk.END)
-        self.selected_notes_text.insert("1.0", notes)
+        self.selected_notes_text.insert("1.0", entry.get("notes") or "")
+        self._update_why_for(entry)
+
+    def _on_event_selected(self, _e=None):
+        sel = self.listbox.curselection()
+        if not sel:
+            return
+        view_i = sel[0]
+        if view_i >= len(self._view_indices):
+            return
+        self._load_entry_into_form(self._view_indices[view_i])
+
+    def _on_corr_selected(self, _e=None):
+        sel = self.corr_list.curselection()
+        if not sel:
+            return
+        view_i = sel[0]
+        if view_i >= len(self._corr_indices):
+            return
+        self._load_entry_into_form(self._corr_indices[view_i])
+
+    def _on_filter_changed(self):
+        self._save_settings()
+        selected = self._selected_index
+        self._refresh_lists()
+        if selected is not None and selected in self._view_indices:
+            self.listbox.selection_set(self._view_indices.index(selected))
+
+    def _select_matching(self, entry: dict):
+        for i, item in enumerate(self.entries):
+            if item.get("started_at") == entry.get("started_at") and item.get("mood") == entry.get(
+                "mood"
+            ):
+                self._selected_index = i
+                if i in self._view_indices:
+                    vi = self._view_indices.index(i)
+                    self.listbox.selection_clear(0, tk.END)
+                    self.listbox.selection_set(vi)
+                    self.listbox.see(vi)
+                self._load_entry_into_form(i)
+                break
 
     def save_selected_notes(self):
         if self._selected_index is None:
-            messagebox.showinfo("No event selected", "Select an event in the log first.")
+            messagebox.showinfo("No selection", "Select a check-in first.")
             return
-        notes = self.selected_notes_text.get("1.0", tk.END).strip()
-        self.entries[self._selected_index]["notes"] = notes
-        self.new_notes_text.delete("1.0", tk.END)
-        self.new_notes_text.insert("1.0", notes)
-        self._notes_placeholder = False
-        self._refresh_list()
-        if self._selected_index in self._view_indices:
-            view_i = self._view_indices.index(self._selected_index)
-            self.listbox.selection_set(view_i)
-        self.selected_event_var.set(
-            format_entry_line(self._selected_index + 1, self.entries[self._selected_index])
-        )
+        self.entries[self._selected_index]["notes"] = self.selected_notes_text.get(
+            "1.0", tk.END
+        ).strip()
+        self._refresh_lists()
         self._autosave()
 
     def remove_selected(self):
-        selection = self.listbox.curselection()
-        if not selection:
+        sel = self.listbox.curselection()
+        if not sel:
             return
-        index = self._view_indices[selection[0]]
+        index = self._view_indices[sel[0]]
         del self.entries[index]
         self.clear_form()
-        self._refresh_list()
+        self._refresh_lists()
         self._autosave()
-        self.refresh_estimate(show_reminder_popup=False)
+        self.refresh_insights(show_reminder_popup=False)
 
     def clear_all(self):
         if not self.entries:
             return
-        if messagebox.askyesno("Clear log", "Remove all events?"):
+        if messagebox.askyesno("Clear all", "Remove all check-ins?"):
             self.entries.clear()
             self.clear_form()
-            self._refresh_list()
-            self._set_dist("")
-            self.result_var.set("Log cleared.")
-            self.confidence_var.set("Confidence: No data")
-            self.reminder_var.set("")
-            self._draw_chart({})
+            self._refresh_lists()
             self._autosave()
+            self.refresh_insights(show_reminder_popup=False)
 
-    def _refresh_list(self):
+    def _refresh_lists(self):
         self.listbox.delete(0, tk.END)
         self._view_indices = []
-        hr_only = bool(self.hr_only_var.get())
-        display_n = 0
+        low_only = bool(self.low_only_var.get())
+        n = 0
         for i, entry in enumerate(self.entries):
-            if hr_only and not is_hr_activity(entry.get("activity", "")):
+            try:
+                is_low = float(entry.get("mood", 99)) <= LOW_MOOD_THRESHOLD
+            except (TypeError, ValueError):
+                is_low = False
+            if low_only and not is_low:
                 continue
-            display_n += 1
+            n += 1
             self._view_indices.append(i)
-            self.listbox.insert(tk.END, format_entry_line(display_n, entry))
+            self.listbox.insert(tk.END, format_entry_line(n, entry))
 
-    # --- estimate / chart / reminders ---
-    def refresh_estimate(self, show_reminder_popup: bool = False):
+        # Correlation list from latest analysis
+        report = self.analyzer.analyze(self.entries)
+        self.corr_list.delete(0, tk.END)
+        self._corr_indices = []
+        for ev in report["depression_events"]:
+            # find index of entry
+            idx = None
+            for i, entry in enumerate(self.entries):
+                if entry.get("started_at") == ev.get("started_at"):
+                    idx = i
+                    break
+            if idx is None:
+                continue
+            self._corr_indices.append(idx)
+            emos = ",".join(ev.get("emotions") or [])
+            line = (
+                f"{ev['date']}  ·  mood {ev['mood']:.0f}/10"
+                f"{('  ·  ' + emos) if emos else ''}"
+                f"  ·  {ev['summary']}"
+            )
+            self.corr_list.insert(tk.END, line)
+
+    def _update_why_for(self, entry: dict):
+        text = self.analyzer.explain_mood(entry, self.entries)
+        self._set_text(self.why_text, text)
+
+    def _set_text(self, widget: tk.Text, text: str):
+        widget.configure(state="normal")
+        widget.delete("1.0", tk.END)
+        widget.insert(tk.END, text)
+        widget.configure(state="disabled")
+
+    # --- insights / charts ---
+    def refresh_insights(self, show_reminder_popup: bool = False):
         report = self.analyzer.analyze(self.entries)
         self.result_var.set(report["message"])
-
-        conf = report.get("confidence_label", "No data")
-        detail = report.get("confidence_detail", "")
-        self.confidence_var.set(f"Confidence: {conf} — {detail}")
-        level = report.get("confidence", "none")
+        self.confidence_var.set(
+            f"Confidence: {report['confidence_label']} — {report['confidence_detail']}"
+        )
         style = {
             "stronger": "Ok.TLabel",
             "fair": "Warn.TLabel",
             "weak": "Urgent.TLabel",
             "none": "PanelMuted.TLabel",
-        }.get(level, "PanelMuted.TLabel")
+        }.get(report.get("confidence"), "PanelMuted.TLabel")
         self.confidence_label.configure(style=style)
 
         reminder = report.get("reminder")
@@ -1038,74 +1024,37 @@ class ActivityLoggerApp(tk.Tk):
                 style="Urgent.TLabel" if reminder["level"] == "urgent" else "Warn.TLabel"
             )
             if show_reminder_popup:
-                self._maybe_popup_reminder(reminder, report)
+                self._maybe_popup_reminder(reminder)
         else:
             self.reminder_var.set("")
 
-        lines = [f"HR call-ins logged: {report['hr_count']}"]
+        lines = [
+            f"Check-ins: {report['count']}  ·  Low days: {report['low_count']}  ·  "
+            f"High days: {report['high_count']}",
+        ]
         person = self.person_var.get().strip()
-        workplace = self.workplace_var.get().strip()
-        if person or workplace:
-            lines.append(f"Tracking: {person or '—'} @ {workplace or '—'}")
+        if person:
+            lines.append(f"Journal for: {person}")
+        if report["factor_stats"]:
+            lines.append("Top low-mood correlates:")
+            for s in report["factor_stats"][:6]:
+                if s["low_count"] < 1:
+                    continue
+                lines.append(
+                    f"  · {s['category']}:{s['value']} → low on {s['p_low']:.0%} "
+                    f"({s['low_count']}/{s['count']} days)"
+                )
+        if report["sleep_buckets"]:
+            bits = ", ".join(f"{k} avg {v:.1f}" for k, v in report["sleep_buckets"].items())
+            lines.append(f"Sleep vs mood: {bits}")
+        self._set_text(self.insights_detail, "\n".join(lines))
+        self._draw_charts(report)
+        self._refresh_lists()
+        if self._selected_index is not None and self._selected_index < len(self.entries):
+            self._update_why_for(self.entries[self._selected_index])
 
-        if report["last_hr"] is not None:
-            last = report["last_hr"]
-            lines.append(
-                f"Last HR: {day_of_week_label(last)} {last.strftime('%Y-%m-%d %H:%M')} "
-                f"({report['days_since_last']} day(s) ago)"
-            )
-        if report["gaps_days"]:
-            gaps = ", ".join(str(g) for g in report["gaps_days"])
-            lines.append(f"Gaps between call-ins (days): {gaps}")
-            lines.append(
-                f"Typical gap: median {report['median_gap_days']:.1f}d  ·  "
-                f"avg {report['avg_gap_days']:.1f}d  ·  "
-                f"range {report['min_gap_days']}-{report['max_gap_days']}d"
-            )
-        if report["predicted_next"] is not None:
-            nxt = report["predicted_next"]
-            lines.append(
-                f"Estimated next: {day_of_week_label(nxt)} {nxt.strftime('%Y-%m-%d %H:%M')}"
-            )
-            if report["overdue_days"] is not None:
-                lines.append(f"Status: overdue by ~{report['overdue_days']} day(s)")
-            elif report["days_until_predicted"] is not None:
-                lines.append(f"Status: ~{report['days_until_predicted']} day(s) away")
-        if report["typical_day"] or report["typical_time"]:
-            lines.append(
-                f"Most common window: {report['typical_day'] or '—'} / "
-                f"{report['typical_time'] or '—'}"
-            )
-        if report["day_of_week_counts"]:
-            day_bits = ", ".join(
-                f"{d}×{c}" for d, c in report["day_of_week_counts"].most_common()
-            )
-            lines.append(f"Day pattern: {day_bits}")
-        if report["time_bucket_counts"]:
-            time_bits = ", ".join(
-                f"{t}×{c}" for t, c in report["time_bucket_counts"].most_common()
-            )
-            lines.append(f"Time pattern: {time_bits}")
-        if report["avg_duration_min"] is not None:
-            lines.append(f"Avg HR meeting length: {format_duration(report['avg_duration_min'])}")
-        if report["leading_context"]:
-            lead_bits = ", ".join(
-                f"{name}×{count}" for name, count in report["leading_context"].most_common(5)
-            )
-            lines.append(f"Often preceded by: {lead_bits}")
-        elif report["hr_count"] >= 1:
-            lines.append(
-                "Tip: when logging HR, use the before-HR checklist to capture warning signs."
-            )
-
-        self._set_dist("\n".join(lines))
-        self._draw_chart(report)
-
-    def _maybe_popup_reminder(self, reminder: dict, report: dict):
-        key_date = ""
-        if report.get("predicted_next") is not None:
-            key_date = report["predicted_next"].strftime("%Y-%m-%d")
-        key = f"{reminder['level']}|{key_date}|{reminder['title']}"
+    def _maybe_popup_reminder(self, reminder: dict):
+        key = f"{reminder['level']}|{reminder['title']}|{datetime.now().strftime('%Y-%m-%d')}"
         if self.settings.get("last_reminder_key") == key:
             return
         self.settings["last_reminder_key"] = key
@@ -1115,207 +1064,198 @@ class ActivityLoggerApp(tk.Tk):
     def _schedule_reminder_check(self):
         if self._reminder_job is not None:
             self.after_cancel(self._reminder_job)
-        # Recheck every 6 hours while the app is open
         self._reminder_job = self.after(6 * 60 * 60 * 1000, self._timed_reminder)
 
     def _timed_reminder(self):
-        self.refresh_estimate(show_reminder_popup=True)
+        self.refresh_insights(show_reminder_popup=True)
         self._schedule_reminder_check()
 
-    def _draw_chart(self, report: dict):
+    def _draw_charts(self, report: dict):
         c = self.chart_canvas
         c.delete("all")
-        width = max(c.winfo_width(), 680)
-        height = 150
-        c.create_rectangle(0, 0, width, height, fill=INPUT_BG, outline="")
+        w = max(c.winfo_width(), 720)
+        h = 220
+        c.create_rectangle(0, 0, w, h, fill=INPUT_BG, outline="")
 
-        gaps = report.get("gaps_days") or []
-        days = report.get("day_of_week_counts") or {}
-
-        # Left panel: gaps
-        c.create_text(12, 14, anchor="w", fill=MUTED, font=FONT_SMALL, text="Days between HR")
-        left_x0, left_x1 = 12, width // 2 - 16
-        plot_top, plot_bot = 28, height - 18
-        if gaps:
-            max_gap = max(gaps) or 1
-            bar_w = max(10, (left_x1 - left_x0) // max(len(gaps), 1) - 6)
-            for i, gap in enumerate(gaps):
-                x = left_x0 + i * (bar_w + 6)
-                h = int((gap / max_gap) * (plot_bot - plot_top))
+        # Panel regions
+        top_h = 110
+        # Mood over time
+        c.create_text(10, 12, anchor="w", fill=MUTED, font=FONT_SMALL, text="Mood over time (★ low)")
+        series = report.get("mood_series") or []
+        plot_l, plot_r, plot_t, plot_b = 10, w - 10, 24, top_h - 8
+        if series:
+            n = len(series)
+            max_m = 10
+            slot = max(4, (plot_r - plot_l) / max(n, 1))
+            for i, point in enumerate(series[-60:]):  # last 60 days
+                mood = point["mood"]
+                x0 = plot_l + i * slot
+                bar_h = (mood / max_m) * (plot_b - plot_t)
+                color = URGENT if point["low"] else ACCENT
                 c.create_rectangle(
-                    x, plot_bot - h, x + bar_w, plot_bot, fill=ACCENT, outline=""
-                )
-                c.create_text(
-                    x + bar_w / 2, plot_bot + 8, fill=MUTED, font=("Segoe UI", 8), text=str(gap)
+                    x0, plot_b - bar_h, x0 + max(slot - 2, 2), plot_b, fill=color, outline=""
                 )
         else:
             c.create_text(
-                left_x0,
-                70,
+                plot_l, 60, anchor="w", fill=MUTED, font=FONT_SMALL, text="Need check-ins to chart mood"
+            )
+
+        # Bottom three panels
+        y0 = top_h + 8
+        third = w // 3
+        panels = [
+            (10, third - 8, "Sleep vs mood (avg)"),
+            (third + 4, 2 * third - 8, "Emotions on low days"),
+            (2 * third + 4, w - 10, "Top correlates P(low|factor)"),
+        ]
+        # Sleep buckets
+        c.create_text(panels[0][0], y0, anchor="w", fill=MUTED, font=FONT_SMALL, text=panels[0][2])
+        buckets = report.get("sleep_buckets") or {}
+        if buckets:
+            keys = list(buckets.keys())
+            max_v = 10
+            bw = max(20, (panels[0][1] - panels[0][0]) // max(len(keys), 1) - 8)
+            for i, key in enumerate(keys):
+                x = panels[0][0] + i * (bw + 8)
+                val = buckets[key]
+                bh = (val / max_v) * (h - y0 - 28)
+                c.create_rectangle(x, h - 16 - bh, x + bw, h - 16, fill=ACCENT, outline="")
+                c.create_text(x + bw / 2, h - 6, fill=MUTED, font=("Segoe UI", 8), text=key)
+        else:
+            c.create_text(
+                panels[0][0],
+                y0 + 40,
                 anchor="w",
                 fill=MUTED,
                 font=FONT_SMALL,
-                text="Need 2+ HR dates to chart gaps",
+                text="Add sleep hours",
             )
 
-        # Right panel: weekdays
-        c.create_text(
-            width // 2 + 8, 14, anchor="w", fill=MUTED, font=FONT_SMALL, text="HR by weekday"
-        )
-        labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-        counts = [days.get(d, 0) for d in labels]
-        max_c = max(counts) if any(counts) else 1
-        right_x0 = width // 2 + 8
-        slot = max(16, (width - right_x0 - 12) // 7)
-        for i, (label, count) in enumerate(zip(labels, counts)):
-            x = right_x0 + i * slot
-            h = int((count / max_c) * (plot_bot - plot_top)) if count else 0
-            color = ACCENT if count else SURFACE
-            c.create_rectangle(x, plot_bot - h, x + slot - 6, plot_bot, fill=color, outline="")
-            c.create_text(
-                x + (slot - 6) / 2,
-                plot_bot + 8,
-                fill=MUTED,
-                font=("Segoe UI", 8),
-                text=label[:2],
-            )
-            if count:
+        # Emotions on low days
+        c.create_text(panels[1][0], y0, anchor="w", fill=MUTED, font=FONT_SMALL, text=panels[1][2])
+        emo = report.get("emotion_low") or Counter()
+        top_emo = emo.most_common(5)
+        if top_emo:
+            max_c = top_emo[0][1]
+            bw = max(16, (panels[1][1] - panels[1][0]) // max(len(top_emo), 1) - 6)
+            for i, (name, count) in enumerate(top_emo):
+                x = panels[1][0] + i * (bw + 6)
+                bh = (count / max_c) * (h - y0 - 28)
+                c.create_rectangle(x, h - 16 - bh, x + bw, h - 16, fill=WARN, outline="")
                 c.create_text(
-                    x + (slot - 6) / 2,
-                    plot_bot - h - 8,
-                    fill=TEXT,
-                    font=("Segoe UI", 8),
-                    text=str(count),
+                    x + bw / 2, h - 6, fill=MUTED, font=("Segoe UI", 7), text=name[:6]
                 )
-
-    def predict_sequence(self):
-        order = 2
-        states = self._state_sequence()
-        if len(states) <= order:
-            messagebox.showinfo(
-                "Need more data",
-                f"Need more than {order} dated events for a sequence forecast.",
+        else:
+            c.create_text(
+                panels[1][0],
+                y0 + 40,
+                anchor="w",
+                fill=MUTED,
+                font=FONT_SMALL,
+                text="No low-day emotions yet",
             )
-            return
 
-        model = MarkovChainPredictor(order=order)
-        model.fit(states)
-        durations = DurationTracker()
-        durations.fit(self.entries)
-        history = states[-order:]
-        next_state, confidence = model.predict_next(history)
-        distribution = model.predict_distribution(history)
-        if next_state is None:
-            messagebox.showinfo(
-                "No sequence match",
-                "That recent sequence has not been seen before. "
-                "The gap-based HR estimate is usually more useful.",
+        # Factor probability bars
+        c.create_text(panels[2][0], y0, anchor="w", fill=MUTED, font=FONT_SMALL, text=panels[2][2])
+        factors = [s for s in report.get("factor_stats") or [] if s["low_count"] >= 1][:5]
+        if factors:
+            bar_left = panels[2][0]
+            bar_right = panels[2][1]
+            for i, s in enumerate(factors):
+                y = y0 + 18 + i * 18
+                frac = s["p_low"]
+                x1 = bar_left + frac * (bar_right - bar_left)
+                c.create_rectangle(bar_left, y, x1, y + 12, fill=URGENT if frac >= 0.5 else ACCENT, outline="")
+                label = f"{s['category']}:{s['value'][:12]} {frac:.0%}"
+                c.create_text(bar_left, y - 2, anchor="sw", fill=TEXT, font=("Segoe UI", 7), text=label)
+        else:
+            c.create_text(
+                panels[2][0],
+                y0 + 40,
+                anchor="w",
+                fill=MUTED,
+                font=FONT_SMALL,
+                text="Need low-mood days",
             )
-            return
 
-        activity, day, bucket = decode_state(next_state)
-        avg_duration = durations.predict(activity, day, bucket)
-        when_bits = [bit for bit in (day, bucket) if bit]
-        when_txt = f" ({', '.join(when_bits)})" if when_bits else ""
+    # --- export ---
+    def build_report(self) -> str:
+        report = self.analyzer.analyze(self.entries)
         lines = [
-            "Sequence forecast (Markov — what tends to follow the latest events):",
-            f"Recent: {history}",
-            f"Next event likely: {activity}{when_txt}  ·  "
-            f"~{format_duration(avg_duration)}  ·  {confidence:.1%}",
-            "",
-            "Probabilities:",
-        ]
-        for state, prob in sorted(distribution.items(), key=lambda x: -x[1]):
-            act, d, b = decode_state(state)
-            avg = durations.predict(act, d, b)
-            context = " · ".join(x for x in (d, b) if x)
-            suffix = f" [{context}]" if context else ""
-            marker = " ★" if is_hr_activity(act) else ""
-            lines.append(f"  {act}{marker}{suffix}: {prob:.1%}  (~{format_duration(avg)})")
-
-        self.refresh_estimate(show_reminder_popup=False)
-        current = self.dist_text.get("1.0", tk.END).rstrip()
-        self._set_dist(current + "\n\n" + "\n".join(lines))
-
-    def _state_sequence(self) -> list[str]:
-        return [entry_to_state(entry) for entry in self.entries if entry_to_state(entry)]
-
-    def _set_dist(self, text: str):
-        self.dist_text.configure(state="normal")
-        self.dist_text.delete("1.0", tk.END)
-        self.dist_text.insert(tk.END, text)
-        self.dist_text.configure(state="disabled")
-
-    # --- print / export / backup ---
-    def build_printable_report(self) -> str:
-        lines = [
-            "HumanPredict — HR Call-In Pattern Log",
+            "Mood Minder — Personal Mood Journal",
             f"Created: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
             f"Person: {self.person_var.get().strip() or '—'}",
-            f"Workplace: {self.workplace_var.get().strip() or '—'}",
             "=" * 56,
             "",
-            "EVENT LOG",
+            "INSIGHTS",
+            "-" * 56,
+            report["message"],
+            f"Confidence: {report['confidence_label']} — {report['confidence_detail']}",
+            "",
+            "CHECK-INS",
             "-" * 56,
         ]
         if not self.entries:
-            lines.append("(No events logged.)")
+            lines.append("(No check-ins.)")
         else:
             for i, entry in enumerate(self.entries, start=1):
                 lines.append(format_entry_line(i, entry))
-                notes = (entry.get("notes") or "").strip()
-                lines.append(f"    Notes: {notes or '(none)'}")
+                if entry.get("thoughts"):
+                    lines.append(f"    Thoughts: {entry['thoughts']}")
+                if entry.get("notes"):
+                    lines.append(f"    Notes: {entry['notes']}")
                 lines.append("")
-        report = self.analyzer.analyze(self.entries)
+        lines.extend(["", "LOW-MOOD / DEPRESSION CORRELATION LOG", "-" * 56])
+        if not report["depression_events"]:
+            lines.append("(No low-mood days ≤4 yet.)")
+        else:
+            for ev in report["depression_events"]:
+                lines.append(f"{ev['date']}  mood {ev['mood']:.0f}/10")
+                lines.append(f"    {ev['summary']}")
+                lines.append("")
+        if self._selected_index is not None and self._selected_index < len(self.entries):
+            lines.extend(
+                [
+                    "",
+                    "WHY THIS MOOD (selected)",
+                    "-" * 56,
+                    self.analyzer.explain_mood(
+                        self.entries[self._selected_index], self.entries
+                    ),
+                ]
+            )
         lines.extend(
             [
-                "NEXT HR CALL-IN ESTIMATE",
-                "-" * 56,
-                f"Confidence: {report.get('confidence_label')} — {report.get('confidence_detail')}",
-                report["message"],
-                "",
-                self.dist_text.get("1.0", tk.END).strip(),
                 "",
                 "=" * 56,
-                "Note: Estimates are based on past gaps and are not guarantees.",
+                "Personal patterns only — not a medical diagnosis.",
             ]
         )
         return "\n".join(lines)
 
-    def print_log(self):
+    def save_pdf(self):
         if not self.entries:
-            messagebox.showinfo("Nothing to save", "Log an event first, then save a PDF.")
+            messagebox.showinfo("Nothing to save", "Log a check-in first.")
             return
-
-        default_name = f"HumanPredict_HR_log_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
         path = filedialog.asksaveasfilename(
-            title="Save log as PDF",
+            title="Save Mood Minder PDF",
             defaultextension=".pdf",
-            initialfile=default_name,
+            initialfile=f"MoodMinder_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
             initialdir=str(app_dir()),
             filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
         )
         if not path:
             return
-
-        report = self.build_printable_report()
         try:
-            write_text_pdf(
-                path,
-                report,
-                title="HumanPredict HR Call-In Pattern Log",
-            )
+            write_text_pdf(path, self.build_report(), title="Mood Minder Report")
         except OSError as exc:
-            messagebox.showerror("PDF failed", f"Could not save PDF:\n{exc}")
+            messagebox.showerror("PDF failed", str(exc))
             return
-
-        messagebox.showinfo("PDF saved", f"Report saved as PDF:\n{path}")
-
+        messagebox.showinfo("PDF saved", f"Report saved:\n{path}")
         if messagebox.askyesno(
             "Print PDF?",
             "Do you want to print this PDF now?\n\n"
-            "Choose Yes to open the Windows print dialog.\n"
-            "Choose No to keep the file only.",
+            "Yes opens the Windows print dialog.\nNo keeps the file only.",
         ):
             try:
                 os.startfile(path, "print")
@@ -1324,46 +1264,42 @@ class ActivityLoggerApp(tk.Tk):
                     os.startfile(path)
                     messagebox.showinfo(
                         "Opened PDF",
-                        "Could not send directly to the printer.\n"
-                        "The PDF was opened — use Print from your PDF viewer.",
+                        "Could not send to printer directly. Use Print in your PDF viewer.",
                     )
                 except OSError as exc:
-                    messagebox.showerror("Print failed", f"Could not open the PDF:\n{exc}")
+                    messagebox.showerror("Print failed", str(exc))
 
-    def export_log_text(self):
+    def export_text(self):
         if not self.entries:
-            messagebox.showinfo("Nothing to export", "Log an event first, then export.")
+            messagebox.showinfo("Nothing to export", "Log a check-in first.")
             return
         path = filedialog.asksaveasfilename(
-            title="Export log as text",
+            title="Export text",
             defaultextension=".txt",
-            initialfile=f"HumanPredict_HR_log_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+            initialfile=f"MoodMinder_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
             filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
         )
         if not path:
             return
         try:
-            Path(path).write_text(self.build_printable_report(), encoding="utf-8")
+            Path(path).write_text(self.build_report(), encoding="utf-8")
         except OSError as exc:
             messagebox.showerror("Export failed", str(exc))
             return
-        messagebox.showinfo("Exported", f"Log saved as text:\n{path}")
+        messagebox.showinfo("Exported", path)
 
     def backup_json(self):
         path = filedialog.asksaveasfilename(
-            title="Backup log as JSON",
+            title="Backup JSON",
             defaultextension=".json",
-            initialfile=f"HumanPredict_HR_backup_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+            initialfile=f"MoodMinder_backup_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
             filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
         )
         if not path:
             return
         payload = {
             "exported_at": datetime.now().isoformat(timespec="seconds"),
-            "settings": {
-                "person": self.person_var.get().strip(),
-                "workplace": self.workplace_var.get().strip(),
-            },
+            "settings": {"person": self.person_var.get().strip()},
             "entries": self.entries,
         }
         try:
@@ -1371,23 +1307,18 @@ class ActivityLoggerApp(tk.Tk):
         except OSError as exc:
             messagebox.showerror("Backup failed", str(exc))
             return
-        messagebox.showinfo("Backup saved", f"JSON backup written to:\n{path}")
+        messagebox.showinfo("Backup saved", path)
 
     def show_help(self):
         messagebox.showinfo(
-            "HumanPredict help",
-            "HR call-in tracker\n\n"
-            "• Who/where — person and workplace labels on each event\n"
-            "• Log HR call-in — saves HR and offers a before-HR checklist\n"
-            "• Update selected — edit date/time/duration/notes of a log row\n"
-            "• Estimate — gap-based next date + Weak/Fair/Stronger confidence\n"
-            "• Reminders — popup when the window is near or overdue\n"
-            "• Chart — gaps between HR dates and weekday counts\n"
-            "• HR only filter — show only ★ call-ins in the list\n"
-            "• Save PDF — creates a PDF, then asks if you want to print it\n"
-            "• Export text / Backup JSON — other file copies\n\n"
-            "Hover any control for a short tip.\n"
-            "Estimates are helpers, not guarantees.",
+            "Mood Minder help",
+            "Mood Minder is a personal mood journal.\n\n"
+            "1. Log mood (1–10), emotions, sleep, food, people, events, location, thoughts.\n"
+            "2. After enough days, Insights and Charts show patterns.\n"
+            "3. The Depression correlation log lists low days (≤4) with factor probabilities.\n"
+            "4. Why this mood explains the selected check-in in plain language.\n"
+            "5. Save PDF creates a report, then asks if you want to print.\n\n"
+            "Not a medical device or diagnosis. If you are in crisis, seek professional help.",
         )
 
     def save_log(self):
@@ -1396,34 +1327,28 @@ class ActivityLoggerApp(tk.Tk):
 
     def _autosave(self):
         self._save_settings()
-        self._write_log()
-
-    def _write_log(self):
         LOG_PATH.write_text(json.dumps(self.entries, indent=2), encoding="utf-8")
 
     def _load_log(self):
-        paths = [LOG_PATH, app_dir() / "activity_log.json"]
-        for path in paths:
-            if not path.exists():
-                continue
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if not isinstance(data, list):
-                    continue
-                self.entries = []
-                for raw in data:
-                    entry = normalize_entry(raw)
-                    if entry:
-                        self.entries.append(entry)
-                self.entries.sort(key=lambda e: e.get("started_at") or "")
-                self._refresh_list()
-                if path != LOG_PATH:
-                    self._write_log()
+        if not LOG_PATH.exists():
+            self._set_text(self.why_text, "Save or select a check-in to see an explanation.")
+            return
+        try:
+            data = json.loads(LOG_PATH.read_text(encoding="utf-8"))
+            if not isinstance(data, list):
                 return
-            except (json.JSONDecodeError, OSError):
-                continue
+            self.entries = []
+            for raw in data:
+                entry = normalize_entry(raw)
+                if entry:
+                    self.entries.append(entry)
+            self.entries.sort(key=lambda e: e.get("started_at") or "")
+            self._refresh_lists()
+        except (json.JSONDecodeError, OSError):
+            pass
+        self._set_text(self.why_text, "Save or select a check-in to see an explanation.")
 
 
 if __name__ == "__main__":
-    app = ActivityLoggerApp()
+    app = MoodMinderApp()
     app.mainloop()

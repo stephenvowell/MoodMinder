@@ -8,7 +8,12 @@ install-info.json
 hr_pattern_log.json
 hr_settings.json
 activity_log.json
+mood_log.json
+mood_settings.json
 *.bak
 _user_*.json
 test_report.pdf
 HumanPredict_HR_log_*.pdf
+MoodMinder_*.pdf
+MoodMinder_*.txt
+MoodMinder_*.json

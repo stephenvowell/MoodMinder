@@ -1,10 +1,10 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-title Build HumanPredict standalone EXE
+title Build Mood Minder standalone EXE
 
 echo.
-echo  Build a standalone HumanPredict.exe
+echo  Build a standalone MoodMinder.exe
 echo  (Target PC will NOT need Python installed)
 echo.
 
@@ -22,8 +22,8 @@ if errorlevel 1 goto :fail
 echo.
 echo Building EXE...
 %PY% -m PyInstaller --noconfirm --clean --windowed --onefile ^
-  --name HumanPredict ^
-  --hidden-import humanPredict ^
+  --name MoodMinder ^
+  --hidden-import mood_engine ^
   --hidden-import pdf_export ^
   app.py
 if errorlevel 1 goto :fail
@@ -31,10 +31,7 @@ if errorlevel 1 goto :fail
 echo.
 echo Done.
 echo EXE location:
-echo   %cd%\dist\HumanPredict.exe
-echo.
-echo Copy that single file to another PC and double-click to run.
-echo Logs will be created next to the EXE on first use.
+echo   %cd%\dist\MoodMinder.exe
 echo.
 pause
 exit /b 0

@@ -1,4 +1,4 @@
-# HumanPredict Windows installer
+# Mood Minder Windows installer
 # Checks for Python, creates a virtual environment, installs requirements,
 # and adds Desktop + Start Menu shortcuts.
 
@@ -65,12 +65,12 @@ function New-Shortcut {
     $sc.Save()
 }
 
-Write-Host "HumanPredict installer" -ForegroundColor White
+Write-Host "Mood Minder installer" -ForegroundColor White
 Write-Host "Folder: $Root"
 
 # --- Required files ---
 Write-Step "Checking app files"
-foreach ($name in @("app.py", "humanPredict.py", "pdf_export.py", "requirements.txt", "run.bat")) {
+foreach ($name in @("app.py", "mood_engine.py", "pdf_export.py", "requirements.txt", "run.bat")) {
     if (-not (Test-Path (Join-Path $Root $name))) {
         throw "Missing required file: $name"
     }
@@ -121,7 +121,7 @@ Write-Host "Requirements installed (stdlib app — no extra packages needed)."
 
 # --- Smoke test ---
 Write-Step "Verifying app imports"
-& $venvPython -c "import app; import humanPredict; print('import ok')"
+& $venvPython -c "import app; import mood_engine; print('import ok')"
 if ($LASTEXITCODE -ne 0) {
     throw "App import check failed."
 }
@@ -129,17 +129,17 @@ if ($LASTEXITCODE -ne 0) {
 # --- Shortcuts ---
 Write-Step "Creating shortcuts"
 $desktop = [Environment]::GetFolderPath("Desktop")
-$programs = Join-Path ([Environment]::GetFolderPath("StartMenu")) "Programs\HumanPredict"
+$programs = Join-Path ([Environment]::GetFolderPath("StartMenu")) "Programs\Mood Minder"
 New-Item -ItemType Directory -Force -Path $programs | Out-Null
 
 $runBat = Join-Path $Root "run.bat"
-$desktopLnk = Join-Path $desktop "HumanPredict.lnk"
-$startLnk = Join-Path $programs "HumanPredict.lnk"
+$desktopLnk = Join-Path $desktop "Mood Minder.lnk"
+$startLnk = Join-Path $programs "Mood Minder.lnk"
 
 New-Shortcut -ShortcutPath $desktopLnk -TargetPath $runBat -Arguments "" `
-    -WorkingDirectory $Root -Description "HumanPredict HR Call-In Tracker"
+    -WorkingDirectory $Root -Description "Mood Minder — personal mood journal"
 New-Shortcut -ShortcutPath $startLnk -TargetPath $runBat -Arguments "" `
-    -WorkingDirectory $Root -Description "HumanPredict HR Call-In Tracker"
+    -WorkingDirectory $Root -Description "Mood Minder — personal mood journal"
 
 Write-Host "Desktop shortcut: $desktopLnk"
 Write-Host "Start Menu shortcut: $startLnk"
@@ -155,9 +155,9 @@ $info | ConvertTo-Json | Set-Content -Path (Join-Path $Root "install-info.json")
 
 Write-Host ""
 Write-Host "Installation complete." -ForegroundColor Green
-Write-Host "Launch with: Desktop shortcut 'HumanPredict'  or  run.bat"
+Write-Host "Launch with: Desktop shortcut 'Mood Minder'  or  run.bat"
 Write-Host ""
-$launch = Read-Host "Launch HumanPredict now? (Y/N)"
+$launch = Read-Host "Launch Mood Minder now? (Y/N)"
 if ($launch -match '^[Yy]') {
     Start-Process -FilePath $runBat -WorkingDirectory $Root
 }
