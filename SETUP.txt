@@ -1,0 +1,65 @@
+HumanPredict — install on another Windows PC
+===========================================
+
+You have two ways to put this app on another computer.
+
+
+OPTION A — Easy installer (uses Python)
+---------------------------------------
+1. Copy the whole HumanPredict folder to the other PC
+   (USB drive, zip file, OneDrive, etc.)
+
+2. On that PC, double-click:  install.bat
+
+3. If Python is missing:
+   - The installer opens https://www.python.org/downloads/windows/
+   - Install Python 3.10 or newer
+   - Check "Add python.exe to PATH"
+   - Run install.bat again
+
+4. When install finishes:
+   - Use the Desktop shortcut "HumanPredict"
+   - Or double-click run.bat
+
+The installer:
+  - Checks for Python 3.10+
+  - Checks that tkinter (GUI) works
+  - Creates a local .venv folder
+  - Installs requirements.txt
+  - Adds Desktop + Start Menu shortcuts
+
+
+OPTION B — Standalone EXE (no Python on the other PC)
+-----------------------------------------------------
+Build this once on a PC that already has Python:
+
+1. Double-click:  build_standalone.bat
+2. Find:  dist\HumanPredict.exe
+3. Copy ONLY HumanPredict.exe to the other PC
+4. Double-click the EXE to run
+
+No Python install is required on the target PC.
+
+
+What to copy for Option A
+-------------------------
+Minimum files/folders:
+  app.py
+  humanPredict.py
+  pdf_export.py
+  requirements.txt
+  install.bat
+  install.ps1
+  run.bat
+  SETUP.txt
+
+Optional to copy:
+  hr_pattern_log.json   (existing log data)
+  hr_settings.json      (person/workplace settings)
+
+
+Notes
+-----
+- Windows 10/11 recommended
+- App data is stored as JSON next to the app files
+- Estimates are pattern helpers, not guarantees

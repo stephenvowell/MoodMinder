@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+install-info.json
+hr_pattern_log.json
+hr_settings.json
+activity_log.json
+*.bak
+_user_*.json
+test_report.pdf
+HumanPredict_HR_log_*.pdf

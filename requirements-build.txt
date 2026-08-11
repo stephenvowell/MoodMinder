@@ -1,0 +1,2 @@
+# Only needed if you build a standalone .exe (no Python on the target PC)
+pyinstaller>=6.0
