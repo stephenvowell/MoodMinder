@@ -10,6 +10,9 @@ import random
 LOW_MOOD_THRESHOLD = 4
 HIGH_MOOD_THRESHOLD = 7
 POOR_SLEEP_HOURS = 6.0
+# A log with no check-in for longer than this is treated as stale:
+# timing estimates (e.g. "low-mood window overdue") are not trustworthy.
+STALE_LOG_DAYS = 7
 
 EMOTION_PRESETS = [
     "anxious",
@@ -789,6 +792,29 @@ class MoodPatternAnalyzer:
         days_until_low = report.get("days_until_next_low")
         if days_until_low is not None and days_until_low <= 2:
             if days_until_low < 0:
+                days_since_checkin = (as_of.date() - dated[-1][1].date()).days
+                if days_since_checkin > STALE_LOG_DAYS:
+                    days_since_low = report.get("days_since_last_low")
+                    median_gap = report.get("median_low_gap_days")
+                    low_bit = (
+                        f"No low day in {days_since_low} day(s)"
+                        if days_since_low is not None
+                        else "No recent low day"
+                    )
+                    gap_bit = (
+                        f", well past the usual median gap of {median_gap:.0f} day(s)"
+                        if median_gap is not None
+                        else ""
+                    )
+                    return {
+                        "level": "soon",
+                        "title": "Log is stale \u2014 long good stretch",
+                        "text": (
+                            f"Last check-in was {days_since_checkin} day(s) ago. "
+                            f"{low_bit}{gap_bit} \u2014 a long good stretch. "
+                            "Log today to refresh the timing estimates."
+                        ),
+                    }
                 return {
                     "level": "urgent",
                     "title": "Low-mood window overdue",
