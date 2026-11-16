@@ -16,7 +16,7 @@ STALE_LOG_DAYS = 7
 
 # Single source of truth for the app version (semantic versioning).
 # Bump this one constant for a new release; app.py reads it from here.
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 EMOTION_PRESETS = [
     "anxious",
@@ -177,6 +177,8 @@ class MoodPatternAnalyzer:
             "count": len(dated),
             "avg_7": None,
             "avg_30": None,
+            "count_7": 0,
+            "count_30": 0,
             "avg_all": None,
             "low_count": 0,
             "high_count": 0,
@@ -201,9 +203,11 @@ class MoodPatternAnalyzer:
             "max_low_gap_days": None,
             "last_low": None,
             "days_since_last_low": None,
+            "days_since_last_checkin": None,
             "predicted_next_low": None,
             "days_until_next_low": None,
             "overdue_low_days": None,
+            "next_low_text": None,
             "recovery_gaps_days": [],
             "median_recovery_days": None,
             "avg_recovery_days": None,
@@ -229,13 +233,14 @@ class MoodPatternAnalyzer:
         report["high_count"] = sum(1 for m in moods if m >= self.high_threshold)
         report["baseline_low_rate"] = report["low_count"] / len(moods)
 
-        def avg_since(days: int) -> float | None:
+        def avg_since(days: int) -> tuple[float | None, int]:
             cutoff = as_of - timedelta(days=days)
             vals = [float(e["mood"]) for e, dt in dated if dt >= cutoff]
-            return mean(vals) if vals else None
+            return (mean(vals), len(vals)) if vals else (None, 0)
 
-        report["avg_7"] = avg_since(7)
-        report["avg_30"] = avg_since(30)
+        report["avg_7"], report["count_7"] = avg_since(7)
+        report["avg_30"], report["count_30"] = avg_since(30)
+        report["days_since_last_checkin"] = (as_of.date() - dated[-1][1].date()).days
 
         by_day: dict[str, list[float]] = defaultdict(list)
         for entry, dt in dated:
@@ -397,6 +402,7 @@ class MoodPatternAnalyzer:
         report["depression_events"] = events
 
         self._fill_timing_estimates(report, dated, as_of)
+        report["next_low_text"] = self._next_low_sentence(report)
         report.update(self._confidence(len(dated), report))
         report["reminder"] = self._reminder(dated, as_of, report)
         report["message"] = self._build_message(report)
@@ -545,42 +551,77 @@ class MoodPatternAnalyzer:
                 best_dist = dist
         return best
 
+    def _next_low_sentence(self, report: dict) -> str | None:
+        """Plain-language next-low-day sentence, or None if not estimable.
+
+        A predicted date far in the past is not called "overdue" when the
+        last low day was long ago (a long good stretch) or the log is stale.
+        """
+        d = report.get("days_until_next_low")
+        if d is None:
+            return None
+        days_since_low = report.get("days_since_last_low")
+        median_gap = report.get("median_low_gap_days")
+        days_since_checkin = report.get("days_since_last_checkin")
+        long_stretch = (
+            days_since_low is not None
+            and median_gap
+            and days_since_low > 3 * median_gap
+        )
+        stale_log = (
+            days_since_checkin is not None
+            and days_since_checkin > STALE_LOG_DAYS
+        )
+        if d < 0 and (long_stretch or stale_log):
+            gap_bit = (
+                f", well past your usual gap of about {median_gap:.0f} days"
+                if median_gap
+                else ""
+            )
+            if days_since_low is not None:
+                n = int(days_since_low)
+                return (
+                    f"No low day in {n} day{'s' if n != 1 else ''}{gap_bit} — "
+                    "a long good stretch."
+                )
+            return "No low day for a long stretch."
+        if d < 0:
+            n = abs(int(d))
+            return f"A low day was expected about {n} day{'s' if n != 1 else ''} ago."
+        if d == 0:
+            return "A low day may come today."
+        n = int(d)
+        return f"Your next low day is likely in about {n} day{'s' if n != 1 else ''}."
+
     def _build_message(self, report: dict) -> str:
+        """Plain-language summary of the report — short sentences, no jargon."""
+
+        def days(n: int) -> str:
+            n = int(n)
+            return f"{n} day" if n == 1 else f"{n} days"
+
         parts = []
         if report.get("days_until_mood_change") is not None:
             d = report["days_until_mood_change"]
             band = report.get("current_mood_band") or "current"
             into = report.get("days_in_current_band")
-            into_bit = f" ({band} for {into}d so far)" if into is not None else ""
+            gap = report.get("median_change_gap_days")
             if d < 0:
-                parts.append(
-                    f"A shift from {band} may already be due "
-                    f"(~{abs(d)} day(s) past your usual {band} streak){into_bit}."
-                )
+                if into is not None:
+                    parts.append(
+                        f"Your mood is due for a change — it has been {band} "
+                        f"for {days(into)}."
+                    )
+                else:
+                    parts.append("Your mood is due for a change.")
             elif d == 0:
-                parts.append(
-                    f"Based on your usual {band} streak length, a mood change is estimated today"
-                    f"{into_bit}."
-                )
+                parts.append("Your mood may change today.")
+            elif gap:
+                parts.append(f"Your mood usually changes about every {gap:.0f} days.")
             else:
-                parts.append(
-                    f"Based on your usual {band} streak, mood typically changes in about "
-                    f"{d} day(s){into_bit}."
-                )
-        if report.get("days_until_next_low") is not None:
-            d = report["days_until_next_low"]
-            if d < 0:
-                parts.append(
-                    f"Next low-mood window may be overdue by ~{abs(d)} day(s) "
-                    f"(median gap {report['median_low_gap_days']:.0f}d)."
-                )
-            elif d == 0:
-                parts.append("Next low-mood window estimated today.")
-            else:
-                parts.append(
-                    f"Next low-mood day estimated in about {d} day(s) "
-                    f"(median gap {report['median_low_gap_days']:.0f}d)."
-                )
+                parts.append(f"Your mood may change in about {days(d)}.")
+        if report.get("next_low_text"):
+            parts.append(report["next_low_text"])
         elif report.get("low_count", 0) == 1:
             parts.append(
                 "Only one low-mood day so far — log another to estimate days until the next."
@@ -589,24 +630,44 @@ class MoodPatternAnalyzer:
             r = report["days_until_typical_recovery"]
             if r <= 0:
                 parts.append(
-                    f"After lows you usually recover in ~{report['median_recovery_days']:.0f} day(s) — "
-                    "that window is now."
+                    "After a low day, your mood usually lifts within about a day — "
+                    "that time has passed."
                 )
             else:
                 parts.append(
-                    f"If this low follows your pattern, mood often lifts in ~{r} day(s) "
-                    f"(typical recovery {report['median_recovery_days']:.0f}d)."
+                    f"After a low day, your mood usually lifts in about {days(r)}."
                 )
+        elif report.get("median_recovery_days") is not None:
+            med = report["median_recovery_days"]
+            parts.append(
+                f"After a low day, your mood usually lifts within about {med:.0f} "
+                f"{'day' if round(med) == 1 else 'days'}."
+            )
         if report.get("next_mood_band"):
-            parts.append(
-                f"Sequence guess for next check-in: {report['next_mood_band']} "
-                f"({report['next_mood_band_prob']:.0%})."
-            )
+            band = report["next_mood_band"]
+            prob = report.get("next_mood_band_prob")
+            if prob:
+                parts.append(
+                    f"Your next check-in will most likely be {band} "
+                    f"(about {prob:.0%} likely)."
+                )
+            else:
+                parts.append(f"Your next check-in will most likely be {band}.")
         if report.get("avg_7") is not None:
+            n = report.get("count_7") or 0
+            word = "check-in" if n == 1 else "check-ins"
             parts.append(
-                f"7-day avg {report['avg_7']:.1f}/10 · 30-day {report['avg_30']:.1f}/10 · "
-                f"{report['low_count']} low day(s)"
+                f"Last 7 days: {report['avg_7']:.1f} out of 10 (from {n} {word})."
             )
+        if report.get("avg_30") is not None:
+            n = report.get("count_30") or 0
+            word = "check-in" if n == 1 else "check-ins"
+            parts.append(
+                f"Last 30 days: {report['avg_30']:.1f} out of 10 (from {n} {word})."
+            )
+        if report.get("low_count", 0):
+            n = report["low_count"]
+            parts.append(f"{n} low {'day' if n == 1 else 'days'} in total.")
         if not parts:
             return f"{report.get('count', 0)} check-in(s) logged."
         return " ".join(parts)
@@ -817,6 +878,22 @@ class MoodPatternAnalyzer:
                             f"Last check-in was {days_since_checkin} day(s) ago. "
                             f"{low_bit}{gap_bit} \u2014 a long good stretch. "
                             "Log today to refresh the timing estimates."
+                        ),
+                    }
+                days_since_low = report.get("days_since_last_low")
+                median_gap = report.get("median_low_gap_days")
+                if (
+                    days_since_low is not None
+                    and median_gap
+                    and days_since_low > 3 * median_gap
+                ):
+                    return {
+                        "level": "soon",
+                        "title": "Long good stretch",
+                        "text": (
+                            f"No low day in {days_since_low} day(s), well past "
+                            f"your usual gap of about {median_gap:.0f} days — "
+                            "a long good stretch."
                         ),
                     }
                 return {

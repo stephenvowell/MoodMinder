@@ -609,7 +609,7 @@ class MoodMinderApp(tk.Tk):
         self.insights_detail.pack(fill="x")
         ToolTip(
             self.insights_detail,
-            "Gap-based timing (days until mood-band change / next low) plus top correlates.",
+            "Timing estimates and top patterns from your log.",
         )
 
         # Charts
@@ -1048,49 +1048,61 @@ class MoodMinderApp(tk.Tk):
             lines.append(f"Journal for: {person}")
 
         lines.append("")
-        lines.append("Timing (from your gaps):")
+        lines.append("")
+        lines.append("Timing (from your log):")
         if report.get("days_until_mood_change") is not None:
             pred = report.get("predicted_next_change")
             pred_s = pred.strftime("%Y-%m-%d") if pred else "—"
             band = report.get("current_mood_band") or "?"
             into = report.get("days_in_current_band")
-            lines.append(
-                f"  · Days until mood changes: {report['days_until_mood_change']} "
-                f"(est. {pred_s}; usual {band} streak "
-                f"{report.get('median_change_gap_days'):.1f}d, now day {into})"
-            )
+            d = report["days_until_mood_change"]
+            med = report.get("median_change_gap_days")
+            if d < 0:
+                into_bit = (
+                    f" — it has been {band} for {into} day{'s' if into != 1 else ''}"
+                    if into is not None
+                    else ""
+                )
+                lines.append(f"  · Your mood is due for a change{into_bit}.")
+            elif d == 0:
+                lines.append("  · Your mood may change today.")
+            elif med:
+                lines.append(
+                    f"  · Your mood usually changes about every {med:.0f} days "
+                    f"(next change around {pred_s})."
+                )
+            else:
+                lines.append(f"  · Your mood may change in about {d} days.")
         else:
-            lines.append("  · Need more band changes in the log to estimate mood-shift timing.")
-        if report.get("days_until_next_low") is not None:
-            pred = report.get("predicted_next_low")
-            pred_s = pred.strftime("%Y-%m-%d") if pred else "—"
+            lines.append("  · Need more mood changes in the log to estimate timing.")
+        if report.get("next_low_text"):
+            lines.append(f"  · {report['next_low_text']}")
             gaps = report.get("low_gaps_days") or []
             gap_txt = ", ".join(str(g) for g in gaps[-6:])
-            lines.append(
-                f"  · Days until next low (≤4): {report['days_until_next_low']} "
-                f"(est. {pred_s}; median {report.get('median_low_gap_days'):.1f}d)"
-            )
             if gap_txt:
-                lines.append(f"  · Recent low-day gaps (days): {gap_txt}")
+                lines.append(f"  · Your low days were {gap_txt} days apart.")
             if report.get("typical_low_weekday"):
                 lines.append(f"  · Low days often fall on: {report['typical_low_weekday']}")
         elif report.get("low_count", 0) < 2:
-            lines.append("  · Log 2+ low-mood days (≤4) to estimate days until the next low.")
+            lines.append("  · Log 2+ low days to estimate when the next low may come.")
         if report.get("median_recovery_days") is not None:
             rec = report.get("days_until_typical_recovery")
-            rec_bit = (
-                f" · ~{rec} day(s) left in this episode"
-                if rec is not None
-                else ""
+            med = report["median_recovery_days"]
+            day_word = "day" if round(med) == 1 else "days"
+            bit = (
+                f"  · After a low day, your mood usually lifts "
+                f"within about {med:.0f} {day_word}."
             )
-            lines.append(
-                f"  · Typical recovery after a low: {report['median_recovery_days']:.1f} day(s)"
-                f"{rec_bit}"
-            )
+            if rec is not None:
+                if rec > 0:
+                    bit += f" About {rec} day{'s' if rec != 1 else ''} left in this low spell."
+                else:
+                    bit += " That time has passed."
+            lines.append(bit)
         if report.get("next_mood_band"):
             lines.append(
-                f"  · Next check-in band (sequence): {report['next_mood_band']} "
-                f"({report['next_mood_band_prob']:.0%})"
+                f"  · Your next check-in will most likely be {report['next_mood_band']} "
+                f"(about {report['next_mood_band_prob']:.0%} likely)."
             )
 
         correlates = [
@@ -1275,21 +1287,6 @@ class MoodMinderApp(tk.Tk):
             report["message"],
             f"Confidence: {report['confidence_label']} — {report['confidence_detail']}",
         ]
-        if report.get("days_until_mood_change") is not None:
-            lines.append(
-                f"Days until mood-band change: {report['days_until_mood_change']} "
-                f"(median gap {report.get('median_change_gap_days')})"
-            )
-        if report.get("days_until_next_low") is not None:
-            lines.append(
-                f"Days until next low: {report['days_until_next_low']} "
-                f"(median gap {report.get('median_low_gap_days')}; "
-                f"gaps {report.get('low_gaps_days')})"
-            )
-        if report.get("median_recovery_days") is not None:
-            lines.append(
-                f"Typical recovery after low: {report['median_recovery_days']:.1f} day(s)"
-            )
         lines.extend(
             [
                 "",
@@ -1416,8 +1413,8 @@ class MoodMinderApp(tk.Tk):
             "Mood Minder help",
             f"Mood Minder is a personal mood journal (version {VERSION}).\n\n"
             "1. Log mood (1–10), emotions, sleep, food, people, events, location, thoughts.\n"
-            "2. Insights estimates days until a mood-band change and the next low day (≤4) "
-            "from gaps in your log — same idea as HumanPredict’s HR timing.\n"
+            "2. Insights estimates when your mood may change and when the next low day "
+            "may come, from the patterns in your log.\n"
             "3. Charts and the Depression correlation log show factor probabilities on low days.\n"
             "4. Why this mood explains the selected check-in in plain language.\n"
             "5. Save PDF creates a report, then asks if you want to print.\n\n"
