@@ -177,6 +177,7 @@ class MoodPatternAnalyzer:
             "confidence_label": "No data",
             "confidence_detail": "Log check-ins with a mood score to begin.",
             "factor_stats": [],
+            "lagged_factor_stats": [],
             "sleep_buckets": {},
             "emotion_low": Counter(),
             "emotion_high": Counter(),
@@ -297,6 +298,60 @@ class MoodPatternAnalyzer:
             )
         stats.sort(key=lambda s: (s["p_low"], s["low_count"], s["lift"]), reverse=True)
         report["factor_stats"] = stats
+
+        # Lagged (delayed) correlation: factors from 1-3 days earlier
+        # that often precede low days (e.g. a conversation whose effect
+        # shows up a few days later).
+        by_date = defaultdict(list)
+        for _entry, _dt in dated:
+            by_date[_dt.date()].append(_entry)
+        low_dates = {
+            _dt.date()
+            for _entry, _dt in dated
+            if float(_entry["mood"]) <= self.low_threshold
+        }
+        lagged_stats = []
+        for lag in (1, 2, 3):
+            lag_total = Counter()
+            lag_low = Counter()
+            lag_dates = defaultdict(list)
+            for day in sorted(by_date):
+                prev = day - timedelta(days=lag)
+                if prev not in by_date:
+                    continue
+                day_factors = set()
+                for prev_entry in by_date[prev]:
+                    day_factors.update(extract_factors(prev_entry))
+                is_low = day in low_dates
+                for cat, val in day_factors:
+                    key = (cat, val)
+                    lag_total[key] += 1
+                    if is_low:
+                        lag_low[key] += 1
+                        lag_dates[key].append(day.strftime("%Y-%m-%d"))
+            for key, total in lag_total.items():
+                if total < 2:
+                    continue
+                low_n = lag_low[key]
+                p_low = low_n / total
+                lift = (p_low / baseline) if baseline > 0 else 0.0
+                cat, val = key
+                lagged_stats.append(
+                    {
+                        "lag": lag,
+                        "category": cat,
+                        "value": val,
+                        "count": total,
+                        "low_count": low_n,
+                        "p_low": p_low,
+                        "lift": lift,
+                        "dates": sorted(set(lag_dates[key])),
+                    }
+                )
+        lagged_stats.sort(
+            key=lambda s: (s["p_low"], s["low_count"], s["lift"]), reverse=True
+        )
+        report["lagged_factor_stats"] = lagged_stats
 
         events = []
         for entry, dt in dated:
@@ -618,6 +673,47 @@ class MoodPatternAnalyzer:
                     f"showed up on {s['p_low']:.0%} of your days with this factor "
                     f"when mood was low (seen on {dates})"
                 )
+
+
+        lines.append("")
+        lines.append("Factors from 1-3 days earlier that often precede low days:")
+        lagged_matches = []
+        if dt is not None:
+            lagged_stats = report.get("lagged_factor_stats") or []
+            by_lag_day = defaultdict(list)
+            for other in entries:
+                other_dt = parse_entry_datetime(other)
+                if other_dt is not None:
+                    by_lag_day[other_dt.date()].append(other)
+            seen = set()
+            for lag in (1, 2, 3):
+                prev = dt.date() - timedelta(days=lag)
+                for prev_entry in by_lag_day.get(prev, []):
+                    for cat, val in extract_factors(prev_entry):
+                        match = next(
+                            (
+                                s
+                                for s in lagged_stats
+                                if s["lag"] == lag
+                                and s["category"] == cat
+                                and s["value"] == val
+                            ),
+                            None,
+                        )
+                        if match and (lag, cat, val) not in seen:
+                            seen.add((lag, cat, val))
+                            lagged_matches.append(match)
+            lagged_matches.sort(
+                key=lambda s: (s["p_low"], s["low_count"]), reverse=True
+            )
+        if lagged_matches:
+            for s in lagged_matches[:3]:
+                lines.append(
+                    f"  \u00b7 {s['lag']} day(s) earlier \u2014 {s['category']}: {s['value']} "
+                    f"(low on {s['p_low']:.0%} of days with this)"
+                )
+        else:
+            lines.append("  \u00b7 No delayed patterns found yet for this day.")
 
         try:
             hours = float(entry.get("sleep_hours"))

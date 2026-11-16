@@ -1115,6 +1115,17 @@ class MoodMinderApp(tk.Tk):
                     f"  · {s['category']}:{s['value']} → low on {s['p_low']:.0%} "
                     f"({s['low_count']}/{s['count']} days)"
                 )
+
+        lagged = [
+            s for s in (report.get("lagged_factor_stats") or []) if s["low_count"] >= 1
+        ][:5]
+        if lagged:
+            lines.append("Delayed patterns (1-3 days earlier):")
+            for s in lagged:
+                lines.append(
+                    f"  \u00b7 {s['lag']}d earlier \u2014 {s['category']}:{s['value']} \u2192 low on {s['p_low']:.0%} "
+                    f"({s['low_count']}/{s['count']} days)"
+                )
         if report["sleep_buckets"]:
             bits = ", ".join(f"{k} avg {v:.1f}" for k, v in report["sleep_buckets"].items())
             lines.append(f"Sleep vs mood: {bits}")
