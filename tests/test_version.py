@@ -13,7 +13,7 @@ class VersionTests(unittest.TestCase):
         self.assertRegex(VERSION, SEMVER_RE)
 
     def test_version_is_current_release(self):
-        self.assertEqual(VERSION, "1.0.2")
+        self.assertEqual(VERSION, "1.0.3")
 
 
 if __name__ == "__main__":

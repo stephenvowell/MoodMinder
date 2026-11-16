@@ -614,7 +614,7 @@ class MoodMinderApp(tk.Tk):
 
         # Charts
         charts = ttk.LabelFrame(
-            root, text="Charts — mood · sleep · emotions · correlates", style="Card.TLabelframe"
+            root, text="Your mood", style="Card.TLabelframe"
         )
         charts.pack(fill="x", **pad)
         self.chart_canvas = tk.Canvas(
@@ -628,9 +628,19 @@ class MoodMinderApp(tk.Tk):
         self.chart_canvas.pack(fill="x")
         ToolTip(
             self.chart_canvas,
-            "Top: mood over time (★ low days). Bottom-left: sleep vs mood. "
-            "Bottom-mid: emotions on low days. Bottom-right: factor probabilities.",
+            "One line for your mood. Dots mark low days, triggers, and what helps. "
+            "The coach line under it says what to watch for.",
         )
+        self.coach_var = tk.StringVar(value="")
+        ttk.Label(
+            charts,
+            textvariable=self.coach_var,
+            style="Panel.TLabel",
+            wraplength=700,
+            justify="left",
+            font=FONT,
+            foreground=TEXT,
+        ).pack(anchor="w", pady=(6, 0))
 
         # Depression correlation log
         corr = ttk.LabelFrame(
@@ -1017,6 +1027,7 @@ class MoodMinderApp(tk.Tk):
     def refresh_insights(self, show_reminder_popup: bool = False):
         report = self.analyzer.analyze(self.entries)
         self.result_var.set(report["message"])
+        self.coach_var.set(report.get("coach_message") or "")
         self.confidence_var.set(
             f"Confidence: {report['confidence_label']} — {report['confidence_detail']}"
         )
@@ -1172,106 +1183,91 @@ class MoodMinderApp(tk.Tk):
         h = 220
         c.create_rectangle(0, 0, w, h, fill=INPUT_BG, outline="")
 
-        # Panel regions
-        top_h = 110
-        # Mood over time
-        c.create_text(10, 12, anchor="w", fill=MUTED, font=FONT_SMALL, text="Mood over time (★ low)")
-        series = report.get("mood_series") or []
-        plot_l, plot_r, plot_t, plot_b = 10, w - 10, 24, top_h - 8
-        if series:
-            n = len(series)
-            max_m = 10
-            slot = max(4, (plot_r - plot_l) / max(n, 1))
-            for i, point in enumerate(series[-60:]):  # last 60 days
-                mood = point["mood"]
-                x0 = plot_l + i * slot
-                bar_h = (mood / max_m) * (plot_b - plot_t)
-                color = URGENT if point["low"] else ACCENT
-                c.create_rectangle(
-                    x0, plot_b - bar_h, x0 + max(slot - 2, 2), plot_b, fill=color, outline=""
-                )
-        else:
-            c.create_text(
-                plot_l, 60, anchor="w", fill=MUTED, font=FONT_SMALL, text="Need check-ins to chart mood"
-            )
+        # Legend at top
+        legend = [(URGENT, "low day"), (WARN, "trigger"), (OK_GREEN, "what helps")]
+        lx = 46
+        ly = 14
+        for color, label in legend:
+            c.create_oval(lx - 3, ly - 3, lx + 3, ly + 3, fill=color, outline="")
+            c.create_text(lx + 6, ly, anchor="w", fill=MUTED, font=FONT_SMALL, text=label)
+            lx += 6 + len(label) * 7 + 18
 
-        # Bottom three panels
-        y0 = top_h + 8
-        third = w // 3
-        panels = [
-            (10, third - 8, "Sleep vs mood (avg)"),
-            (third + 4, 2 * third - 8, "Emotions on low days"),
-            (2 * third + 4, w - 10, "Top correlates P(low|factor)"),
-        ]
-        # Sleep buckets
-        c.create_text(panels[0][0], y0, anchor="w", fill=MUTED, font=FONT_SMALL, text=panels[0][2])
-        buckets = report.get("sleep_buckets") or {}
-        if buckets:
-            keys = list(buckets.keys())
-            max_v = 10
-            bw = max(20, (panels[0][1] - panels[0][0]) // max(len(keys), 1) - 8)
-            for i, key in enumerate(keys):
-                x = panels[0][0] + i * (bw + 8)
-                val = buckets[key]
-                bh = (val / max_v) * (h - y0 - 28)
-                c.create_rectangle(x, h - 16 - bh, x + bw, h - 16, fill=ACCENT, outline="")
-                c.create_text(x + bw / 2, h - 6, fill=MUTED, font=("Segoe UI", 8), text=key)
-        else:
-            c.create_text(
-                panels[0][0],
-                y0 + 40,
-                anchor="w",
-                fill=MUTED,
-                font=FONT_SMALL,
-                text="Add sleep hours",
-            )
+        plot_l, plot_r, plot_t, plot_b = 46, w - 10, 30, 188
 
-        # Emotions on low days
-        c.create_text(panels[1][0], y0, anchor="w", fill=MUTED, font=FONT_SMALL, text=panels[1][2])
-        emo = report.get("emotion_low") or Counter()
-        top_emo = emo.most_common(5)
-        if top_emo:
-            max_c = top_emo[0][1]
-            bw = max(16, (panels[1][1] - panels[1][0]) // max(len(top_emo), 1) - 6)
-            for i, (name, count) in enumerate(top_emo):
-                x = panels[1][0] + i * (bw + 6)
-                bh = (count / max_c) * (h - y0 - 28)
-                c.create_rectangle(x, h - 16 - bh, x + bw, h - 16, fill=WARN, outline="")
-                c.create_text(
-                    x + bw / 2, h - 6, fill=MUTED, font=("Segoe UI", 7), text=name[:6]
-                )
-        else:
-            c.create_text(
-                panels[1][0],
-                y0 + 40,
-                anchor="w",
-                fill=MUTED,
-                font=FONT_SMALL,
-                text="No low-day emotions yet",
-            )
+        chart = report.get("chart_data") or {}
+        points = chart.get("points") or []
+        markers = chart.get("markers") or []
 
-        # Factor probability bars
-        c.create_text(panels[2][0], y0, anchor="w", fill=MUTED, font=FONT_SMALL, text=panels[2][2])
-        factors = [s for s in report.get("factor_stats") or [] if s["low_count"] >= 1][:5]
-        if factors:
-            bar_left = panels[2][0]
-            bar_right = panels[2][1]
-            for i, s in enumerate(factors):
-                y = y0 + 18 + i * 18
-                frac = s["p_low"]
-                x1 = bar_left + frac * (bar_right - bar_left)
-                c.create_rectangle(bar_left, y, x1, y + 12, fill=URGENT if frac >= 0.5 else ACCENT, outline="")
-                label = f"{s['category']}:{s['value'][:12]} {frac:.0%}"
-                c.create_text(bar_left, y - 2, anchor="sw", fill=TEXT, font=("Segoe UI", 7), text=label)
-        else:
+        if not points:
             c.create_text(
-                panels[2][0],
-                y0 + 40,
-                anchor="w",
-                fill=MUTED,
-                font=FONT_SMALL,
-                text="Need low-mood days",
+                w / 2, h / 2, anchor="center", fill=MUTED, font=FONT_SMALL,
+                text="Log a check-in to see your line.",
             )
+            return
+
+        def y_for(mood):
+            return plot_b - (float(mood) - 1) / 9 * (plot_b - plot_t)
+
+        def x_for(i):
+            if len(points) == 1:
+                return (plot_l + plot_r) / 2
+            return plot_l + i * (plot_r - plot_l) / (len(points) - 1)
+
+        # Y axis guide lines and labels
+        for mood_val, word in ((10, "Great"), (5, "Okay"), (1, "Low")):
+            y = y_for(mood_val)
+            c.create_line(plot_l, y, plot_r, y, fill=SURFACE)
+            c.create_text(plot_l - 4, y, anchor="e", fill=MUTED, font=FONT_SMALL, text=word)
+
+        # X axis date labels for up to 6 evenly spaced points
+        n = len(points)
+        if n <= 6:
+            label_indices = list(range(n))
+        else:
+            label_indices = sorted({round(i * (n - 1) / 5) for i in range(6)})
+        for i in label_indices:
+            try:
+                dt = datetime.strptime(points[i]["date"], "%Y-%m-%d")
+                label = f"{dt.strftime('%b')} {dt.day}"
+            except (ValueError, TypeError):
+                label = points[i]["date"]
+            c.create_text(x_for(i), 196, anchor="center", fill=MUTED, font=FONT_SMALL, text=label)
+
+        coords = []
+        for i, p in enumerate(points):
+            coords.extend([x_for(i), y_for(p["mood"])])
+
+        if len(points) > 1:
+            c.create_line(*coords, fill=ACCENT, width=2, smooth=False)
+
+        point_by_date = {}
+        for i, p in enumerate(points):
+            x, y = x_for(i), y_for(p["mood"])
+            point_by_date[p["date"]] = (x, y, p)
+            if p.get("low"):
+                c.create_oval(x - 4, y - 4, x + 4, y + 4, fill=URGENT, outline="")
+            else:
+                c.create_oval(x - 3, y - 3, x + 3, y + 3, fill=ACCENT, outline="")
+
+        # Markers
+        sorted_markers = sorted(markers, key=lambda m: m.get("date", ""))
+        for order, m in enumerate(sorted_markers):
+            date_str = m.get("date")
+            if date_str not in point_by_date:
+                continue
+            x, y, _p = point_by_date[date_str]
+            kind = m.get("kind")
+            label = (m.get("label") or "")[:18]
+            if kind == "trigger":
+                c.create_oval(x - 5, y - 5, x + 5, y + 5, fill=WARN, outline="")
+                offset = 12 if order % 2 == 0 else 26
+                c.create_text(x, y - offset, anchor="s", fill=MUTED, font=FONT_SMALL, text=label)
+            elif kind == "helps":
+                c.create_oval(x - 5, y - 5, x + 5, y + 5, fill=OK_GREEN, outline="")
+                offset = 12 if order % 2 == 0 else 26
+                c.create_text(x, y - offset, anchor="s", fill=MUTED, font=FONT_SMALL, text=label)
+            elif kind == "low":
+                c.create_text(x, y + 12, anchor="n", fill=MUTED, font=FONT_SMALL, text=label)
 
     # --- export ---
     def build_report(self) -> str:
@@ -1415,7 +1411,7 @@ class MoodMinderApp(tk.Tk):
             "1. Log mood (1–10), emotions, sleep, food, people, events, location, thoughts.\n"
             "2. Insights estimates when your mood may change and when the next low day "
             "may come, from the patterns in your log.\n"
-            "3. Charts and the Depression correlation log show factor probabilities on low days.\n"
+            "3. The chart shows your mood as one line, with triggers and what helps marked on it in plain words. The coach line under it says what to watch for.\n"
             "4. Why this mood explains the selected check-in in plain language.\n"
             "5. Save PDF creates a report, then asks if you want to print.\n\n"
             "Not a medical device or diagnosis. If you are in crisis, seek professional help.",

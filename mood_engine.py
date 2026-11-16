@@ -16,7 +16,7 @@ STALE_LOG_DAYS = 7
 
 # Single source of truth for the app version (semantic versioning).
 # Bump this one constant for a new release; app.py reads it from here.
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 
 EMOTION_PRESETS = [
     "anxious",
@@ -195,6 +195,10 @@ class MoodPatternAnalyzer:
             "reminder": None,
             "message": "",
             "baseline_low_rate": 0.0,
+            "baseline_high_rate": 0.0,
+            "top_helpers": [],
+            "chart_data": {"points": [], "markers": []},
+            "coach_message": "",
             # Gap / timing estimates (like HumanPredict days-until)
             "low_gaps_days": [],
             "avg_low_gap_days": None,
@@ -226,6 +230,7 @@ class MoodPatternAnalyzer:
 
         if not dated:
             report["message"] = "Add a check-in with mood, sleep, and daily context to start."
+            report["coach_message"] = "Add a check-in with mood, sleep, and daily context to start."
             return report
 
         moods = [float(e["mood"]) for e, _ in dated]
@@ -233,6 +238,7 @@ class MoodPatternAnalyzer:
         report["low_count"] = sum(1 for m in moods if m <= self.low_threshold)
         report["high_count"] = sum(1 for m in moods if m >= self.high_threshold)
         report["baseline_low_rate"] = report["low_count"] / len(moods)
+        report["baseline_high_rate"] = report["high_count"] / len(moods)
 
         def avg_since(days: int) -> tuple[float | None, int]:
             cutoff = as_of - timedelta(days=days)
@@ -268,11 +274,13 @@ class MoodPatternAnalyzer:
 
         factor_total: Counter = Counter()
         factor_low: Counter = Counter()
+        factor_high: Counter = Counter()
         factor_dates: dict[tuple[str, str], list[str]] = defaultdict(list)
 
         for entry, dt in dated:
             mood = float(entry["mood"])
             is_low = mood <= self.low_threshold
+            is_high = mood >= self.high_threshold
             day = dt.strftime("%Y-%m-%d")
             for cat, val in extract_factors(entry):
                 key = (cat, val)
@@ -280,6 +288,8 @@ class MoodPatternAnalyzer:
                 if is_low:
                     factor_low[key] += 1
                     factor_dates[key].append(day)
+                if is_high:
+                    factor_high[key] += 1
             for emo in entry.get("emotions") or []:
                 e = str(emo).strip().lower()
                 if not e:
@@ -290,6 +300,7 @@ class MoodPatternAnalyzer:
                     report["emotion_high"][e] += 1
 
         baseline = report["baseline_low_rate"] or 0.0
+        baseline_high = report["baseline_high_rate"] or 0.0
         stats = []
         for key, total in factor_total.items():
             if total < 1:
@@ -297,6 +308,9 @@ class MoodPatternAnalyzer:
             low_n = factor_low[key]
             p_low = low_n / total
             lift = (p_low / baseline) if baseline > 0 else 0.0
+            high_n = factor_high[key]
+            p_high = high_n / total
+            lift_high = (p_high / baseline_high) if baseline_high > 0 else 0.0
             cat, val = key
             stats.append(
                 {
@@ -306,6 +320,9 @@ class MoodPatternAnalyzer:
                     "low_count": low_n,
                     "p_low": p_low,
                     "lift": lift,
+                    "high_count": high_n,
+                    "p_high": p_high,
+                    "lift_high": lift_high,
                     "dates": sorted(set(factor_dates[key])),
                 }
             )
@@ -323,10 +340,16 @@ class MoodPatternAnalyzer:
             for _entry, _dt in dated
             if float(_entry["mood"]) <= self.low_threshold
         }
+        high_dates = {
+            _dt.date()
+            for _entry, _dt in dated
+            if float(_entry["mood"]) >= self.high_threshold
+        }
         lagged_stats = []
         for lag in (1, 2, 3):
             lag_total = Counter()
             lag_low = Counter()
+            lag_high = Counter()
             lag_dates = defaultdict(list)
             for day in sorted(by_date):
                 prev = day - timedelta(days=lag)
@@ -336,18 +359,24 @@ class MoodPatternAnalyzer:
                 for prev_entry in by_date[prev]:
                     day_factors.update(extract_factors(prev_entry))
                 is_low = day in low_dates
+                is_high = day in high_dates
                 for cat, val in day_factors:
                     key = (cat, val)
                     lag_total[key] += 1
                     if is_low:
                         lag_low[key] += 1
                         lag_dates[key].append(day.strftime("%Y-%m-%d"))
+                    if is_high:
+                        lag_high[key] += 1
             for key, total in lag_total.items():
                 if total < 2:
                     continue
                 low_n = lag_low[key]
                 p_low = low_n / total
                 lift = (p_low / baseline) if baseline > 0 else 0.0
+                high_n = lag_high[key]
+                p_high = high_n / total
+                lift_high = (p_high / baseline_high) if baseline_high > 0 else 0.0
                 cat, val = key
                 lagged_stats.append(
                     {
@@ -358,6 +387,9 @@ class MoodPatternAnalyzer:
                         "low_count": low_n,
                         "p_low": p_low,
                         "lift": lift,
+                        "high_count": high_n,
+                        "p_high": p_high,
+                        "lift_high": lift_high,
                         "dates": sorted(set(lag_dates[key])),
                     }
                 )
@@ -405,9 +437,12 @@ class MoodPatternAnalyzer:
         self._fill_timing_estimates(report, dated, as_of)
         report["next_low_text"] = self._next_low_sentence(report)
         report["top_triggers"] = self._top_triggers(report)
+        report["top_helpers"] = self._top_helpers(report)
         report.update(self._confidence(len(dated), report))
         report["reminder"] = self._reminder(dated, as_of, report)
         report["message"] = self._build_message(report)
+        report["chart_data"] = self._chart_data(report, dated, as_of)
+        report["coach_message"] = self._coach_message(report, dated, as_of)
 
         return report
 
@@ -676,6 +711,232 @@ class MoodPatternAnalyzer:
                 if len(picked) >= 3:
                     break
         return picked
+
+    def _top_helpers(self, report: dict) -> list[dict]:
+        trigger_keys = {
+            (t["category"], t["value"]) for t in (report.get("top_triggers") or [])
+        }
+        picked: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+
+        def consider(stat: dict, lag: int | None) -> None:
+            if len(picked) >= 2:
+                return
+            if stat.get("count", 0) < 2:
+                return
+            if stat.get("p_high", 0.0) < 0.5:
+                return
+            if stat.get("lift_high", 0.0) <= 1:
+                return
+            key = (stat["category"], stat["value"])
+            # A factor that is already a top trigger is never also
+            # a helper: the coach must not say the same thing both
+            # hurts and helps.
+            if key in trigger_keys:
+                return
+            if key in seen:
+                return
+            seen.add(key)
+            words = self._factor_words(stat["category"], stat["value"])
+            words_lower = words[:1].lower() + words[1:] if words else words
+            high_n = int(stat.get("high_count", 0))
+            total = int(stat["count"])
+            if lag is None:
+                text = (
+                    f"On {words_lower} days, your mood is usually better "
+                    f"({high_n} out of {total} times)."
+                )
+            else:
+                text = (
+                    f"After {words_lower}, a good day usually follows in about "
+                    f"{lag} day{'s' if lag != 1 else ''} "
+                    f"({high_n} out of {total} times)."
+                )
+            picked.append(
+                {
+                    "lag": lag,
+                    "category": stat["category"],
+                    "value": stat["value"],
+                    "count": total,
+                    "high_count": high_n,
+                    "text": text,
+                }
+            )
+
+        lagged = sorted(
+            report.get("lagged_factor_stats") or [],
+            key=lambda s: (s.get("p_high", 0.0), s.get("high_count", 0), s.get("lift_high", 0.0)),
+            reverse=True,
+        )
+        for stat in lagged:
+            consider(stat, stat["lag"])
+            if len(picked) >= 2:
+                break
+        if len(picked) < 2:
+            same_day = sorted(
+                report.get("factor_stats") or [],
+                key=lambda s: (s.get("p_high", 0.0), s.get("high_count", 0), s.get("lift_high", 0.0)),
+                reverse=True,
+            )
+            for stat in same_day:
+                consider(stat, None)
+                if len(picked) >= 2:
+                    break
+        return picked
+
+    def _chart_data(self, report: dict, dated: list, as_of: datetime) -> dict:
+        window_start = as_of.date() - timedelta(days=30)
+        window_end = as_of.date()
+        points = []
+        for item in report.get("mood_series") or []:
+            try:
+                d = datetime.strptime(item["date"], "%Y-%m-%d").date()
+            except (ValueError, TypeError):
+                continue
+            if window_start <= d <= window_end:
+                points.append(
+                    {
+                        "date": item["date"],
+                        "mood": float(item["mood"]),
+                        "low": bool(item["low"]),
+                    }
+                )
+        points.sort(key=lambda p: p["date"])
+        point_dates = {p["date"] for p in points}
+        markers: list[dict] = []
+        for p in points:
+            if p["low"]:
+                markers.append({"date": p["date"], "label": "low day", "kind": "low"})
+        # Factor occurrence dates within window
+        def factor_dates(cat: str, val: str) -> list[str]:
+            dates_set = set()
+            for entry, dt in dated:
+                d = dt.date()
+                if not (window_start <= d <= window_end):
+                    continue
+                if (cat, val) in extract_factors(entry):
+                    dates_set.add(d.strftime("%Y-%m-%d"))
+            return sorted(dates_set)
+
+        for trigger in report.get("top_triggers") or []:
+            dates = factor_dates(trigger["category"], trigger["value"])
+            label = self._factor_words(trigger["category"], trigger["value"])
+            for ds in dates[-6:]:
+                if ds in point_dates:
+                    markers.append({"date": ds, "label": label, "kind": "trigger"})
+        for helper in report.get("top_helpers") or []:
+            dates = factor_dates(helper["category"], helper["value"])
+            label = self._factor_words(helper["category"], helper["value"])
+            for ds in dates[-4:]:
+                if ds in point_dates:
+                    markers.append({"date": ds, "label": label, "kind": "helps"})
+        # Dedupe identical (date, label, kind)
+        seen_m = set()
+        deduped = []
+        for m in markers:
+            key = (m["date"], m["label"], m["kind"])
+            if key in seen_m:
+                continue
+            seen_m.add(key)
+            deduped.append(m)
+        deduped.sort(key=lambda m: m["date"])
+        return {"points": points, "markers": deduped}
+
+    def chart_data(self, entries: list[dict], as_of: datetime | None = None) -> dict:
+        report = self.analyze(entries, as_of)
+        return report["chart_data"]
+
+    def _coach_message(self, report: dict, dated: list, as_of: datetime) -> str:
+        if not dated:
+            return "Add a check-in with mood, sleep, and daily context to start."
+        # a. Heads-up
+        # Skip if most recent entry dated as_of.date() already low
+        today_low = False
+        for entry, dt in dated:
+            if dt.date() == as_of.date():
+                try:
+                    if float(entry.get("mood")) <= self.low_threshold:
+                        today_low = True
+                except (TypeError, ValueError):
+                    pass
+        # Find most recent entry on as_of date? Use any entry that day low -> spec: most recent entry dated as_of.date()
+        # Refine: check last entry on that date
+        today_entries = [(e, dt) for e, dt in dated if dt.date() == as_of.date()]
+        if today_entries:
+            last_today = today_entries[-1][0]
+            try:
+                today_low = float(last_today.get("mood")) <= self.low_threshold
+            except (TypeError, ValueError):
+                today_low = False
+        else:
+            today_low = False
+        if not today_low:
+            best = None  # (expected_in, trigger_index, days_ago, trigger)
+            for idx, trigger in enumerate(report.get("top_triggers") or []):
+                lag = trigger.get("lag")
+                if lag not in (1, 2, 3):
+                    continue
+                cat = trigger["category"]
+                val = trigger["value"]
+                factor_date_set = set()
+                for entry, dt in dated:
+                    if (cat, val) in extract_factors(entry):
+                        factor_date_set.add(dt.date())
+                for f in sorted(factor_date_set):
+                    days_ago = (as_of.date() - f).days
+                    expected_in = lag - days_ago
+                    if 0 <= days_ago <= 3 and expected_in in (0, 1):
+                        candidate = (expected_in, idx, days_ago, trigger)
+                        if best is None or candidate[0] < best[0] or (candidate[0] == best[0] and candidate[1] < best[1]):
+                            best = candidate
+            if best is not None:
+                expected_in, _idx, days_ago, trigger = best
+                words = self._factor_words(trigger["category"], trigger["value"])
+                day_word = "days" if days_ago != 1 else "day"
+                if expected_in == 0:
+                    return (
+                        f"{words} happened {days_ago} {day_word} ago. "
+                        f"Based on your pattern, watch today — that is when it usually hits."
+                    )
+                else:
+                    return (
+                        f"{words} happened {days_ago} {day_word} ago. "
+                        f"Based on your pattern, watch tomorrow — that is when it usually hits."
+                    )
+        # b. Long good stretch
+        days_until = report.get("days_until_next_low")
+        days_since_low = report.get("days_since_last_low")
+        median_gap = report.get("median_low_gap_days")
+        if (
+            days_until is not None
+            and days_until < 0
+            and days_since_low is not None
+            and median_gap
+            and days_since_low > 3 * median_gap
+        ):
+            n = int(days_since_low)
+            if days_since_low > (report.get("max_low_gap_days") or 0):
+                msg = f"No low day in {n} days — the longest stretch yet. What you changed is working."
+            else:
+                msg = f"No low day in {n} days — a long good stretch. What you changed is working."
+            helpers = report.get("top_helpers") or []
+            if helpers:
+                msg += " What helps: " + " ".join(h["text"] for h in helpers[:2]) + " Keep it up."
+            days_since_checkin = report.get("days_since_last_checkin")
+            if days_since_checkin is not None and days_since_checkin > STALE_LOG_DAYS:
+                msg += " Log today to keep the picture current."
+            return msg
+        # c. Stale log
+        days_since_checkin = report.get("days_since_last_checkin")
+        if days_since_checkin is not None and days_since_checkin > STALE_LOG_DAYS:
+            n = int(days_since_checkin)
+            return f"Your last check-in was {n} days ago. Log today to keep the picture current."
+        # d. Else
+        msg = report.get("message") or ""
+        helpers = report.get("top_helpers") or []
+        if helpers:
+            msg += " What helps: " + " ".join(h["text"] for h in helpers[:2])
+        return msg
 
     def _build_message(self, report: dict) -> str:
         """Plain-language summary of the report — short sentences, no jargon."""
