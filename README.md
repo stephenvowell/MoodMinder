@@ -1,6 +1,6 @@
 # Mood Minder
 
-Current version: 1.0.1.
+Current version: 1.0.2.
 
 A Windows desktop mood journal that helps you see personal patterns over ~30 days — mood (1–10), emotions, sleep, food, people, conversations, events, location, and thoughts.
 

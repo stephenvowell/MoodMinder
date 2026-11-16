@@ -16,7 +16,7 @@ STALE_LOG_DAYS = 7
 
 # Single source of truth for the app version (semantic versioning).
 # Bump this one constant for a new release; app.py reads it from here.
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 
 EMOTION_PRESETS = [
     "anxious",
@@ -208,6 +208,7 @@ class MoodPatternAnalyzer:
             "days_until_next_low": None,
             "overdue_low_days": None,
             "next_low_text": None,
+            "top_triggers": [],
             "recovery_gaps_days": [],
             "median_recovery_days": None,
             "avg_recovery_days": None,
@@ -403,6 +404,7 @@ class MoodPatternAnalyzer:
 
         self._fill_timing_estimates(report, dated, as_of)
         report["next_low_text"] = self._next_low_sentence(report)
+        report["top_triggers"] = self._top_triggers(report)
         report.update(self._confidence(len(dated), report))
         report["reminder"] = self._reminder(dated, as_of, report)
         report["message"] = self._build_message(report)
@@ -593,6 +595,88 @@ class MoodPatternAnalyzer:
         n = int(d)
         return f"Your next low day is likely in about {n} day{'s' if n != 1 else ''}."
 
+    @staticmethod
+    def _factor_words(category: str, value: str) -> str:
+        """Plain words for one (category, value) factor - no jargon."""
+        value = str(value).strip()
+        if category == "talked_to":
+            return f"Talking with {value}"
+        if category == "talked_about":
+            return f"Talking about {value}"
+        if category == "emotion":
+            return f"Feeling {value}"
+        if category == "location":
+            return f"Being at {value}"
+        if category == "ate_with":
+            return f"Eating with {value}"
+        if category == "sleep_quality":
+            return f"Sleep rated {value}"
+        if category == "sleep":
+            return {
+                "under_6h": "Sleep under 6 hours",
+                "8h_plus": "Sleep 8 hours or more",
+                "6_to_8h": "Sleep 6 to 8 hours",
+            }.get(value, f"Sleep {value}")
+        if category == "food":
+            return f"Eating {value}"
+        if category == "event":
+            return value[:1].upper() + value[1:] if value else value
+        return f"{category} {value}".strip()
+
+    def _top_triggers(self, report: dict) -> list[dict]:
+        """Top 3 triggers in plain words: lagged (1-3 days) first, then same-day.
+
+        A factor counts only when it shows up at least twice and low days
+        follow it at least half the time and more often than usual.
+        Returns plain dicts with a ready-made sentence in "text".
+        """
+        picked: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+
+        def consider(stat: dict, lag: int | None) -> None:
+            if stat["count"] < 2:
+                return
+            if stat["p_low"] < 0.5:
+                return
+            if stat["lift"] <= 1:
+                return
+            key = (stat["category"], stat["value"])
+            if key in seen:
+                return
+            seen.add(key)
+            words = self._factor_words(stat["category"], stat["value"])
+            low_n = int(stat["low_count"])
+            total = int(stat["count"])
+            if lag is None:
+                text = f"{words}: low {low_n} out of {total} times."
+            else:
+                day_word = "day" if lag == 1 else "days"
+                text = (
+                    f"{words} {lag} {day_word} before a low day: "
+                    f"low {low_n} out of {total} times."
+                )
+            picked.append(
+                {
+                    "lag": lag,
+                    "category": stat["category"],
+                    "value": stat["value"],
+                    "count": total,
+                    "low_count": low_n,
+                    "text": text,
+                }
+            )
+
+        for stat in report.get("lagged_factor_stats") or []:
+            consider(stat, stat["lag"])
+            if len(picked) >= 3:
+                break
+        if len(picked) < 3:
+            for stat in report.get("factor_stats") or []:
+                consider(stat, None)
+                if len(picked) >= 3:
+                    break
+        return picked
+
     def _build_message(self, report: dict) -> str:
         """Plain-language summary of the report — short sentences, no jargon."""
 
@@ -668,6 +752,16 @@ class MoodPatternAnalyzer:
         if report.get("low_count", 0):
             n = report["low_count"]
             parts.append(f"{n} low {'day' if n == 1 else 'days'} in total.")
+        if report.get("low_count", 0) >= 1:
+            triggers = report.get("top_triggers") or []
+            if triggers:
+                trigger_text = " ".join(t["text"] for t in triggers)
+                parts.append(f"What seems to trigger low days: {trigger_text}")
+            else:
+                parts.append(
+                    "No clear triggers found yet - keep logging and the "
+                    "picture will sharpen."
+                )
         if not parts:
             return f"{report.get('count', 0)} check-in(s) logged."
         return " ".join(parts)
