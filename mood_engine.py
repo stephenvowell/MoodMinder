@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
-from statistics import mean
+from statistics import mean, median
 import random
 
 LOW_MOOD_THRESHOLD = 4
@@ -185,6 +185,30 @@ class MoodPatternAnalyzer:
             "reminder": None,
             "message": "",
             "baseline_low_rate": 0.0,
+            # Gap / timing estimates (like HumanPredict days-until)
+            "low_gaps_days": [],
+            "avg_low_gap_days": None,
+            "median_low_gap_days": None,
+            "min_low_gap_days": None,
+            "max_low_gap_days": None,
+            "last_low": None,
+            "days_since_last_low": None,
+            "predicted_next_low": None,
+            "days_until_next_low": None,
+            "overdue_low_days": None,
+            "recovery_gaps_days": [],
+            "median_recovery_days": None,
+            "avg_recovery_days": None,
+            "days_until_typical_recovery": None,
+            "change_gaps_days": [],
+            "median_change_gap_days": None,
+            "days_until_mood_change": None,
+            "predicted_next_change": None,
+            "current_mood_band": None,
+            "days_in_current_band": None,
+            "next_mood_band": None,
+            "next_mood_band_prob": None,
+            "typical_low_weekday": None,
         }
 
         if not dated:
@@ -310,18 +334,220 @@ class MoodPatternAnalyzer:
         events.sort(key=lambda e: e["date"], reverse=True)
         report["depression_events"] = events
 
-        report.update(self._confidence(len(dated)))
-        report["reminder"] = self._reminder(dated, as_of)
-        if report["avg_7"] is not None:
-            report["message"] = (
-                f"7-day avg mood {report['avg_7']:.1f}/10 · "
-                f"30-day {report['avg_30']:.1f}/10 · "
-                f"{report['low_count']} low-mood day(s) logged"
-            )
-        else:
-            report["message"] = f"{len(dated)} check-in(s) logged."
+        self._fill_timing_estimates(report, dated, as_of)
+        report.update(self._confidence(len(dated), report))
+        report["reminder"] = self._reminder(dated, as_of, report)
+        report["message"] = self._build_message(report)
 
         return report
+
+    def _fill_timing_estimates(
+        self,
+        report: dict,
+        dated: list[tuple[dict, datetime]],
+        as_of: datetime,
+    ) -> None:
+        """Gaps between low days, recovery time, and days until mood band changes."""
+        low_dates: list[datetime] = []
+        seen_low_days: set[str] = set()
+        for entry, dt in dated:
+            if float(entry["mood"]) > self.low_threshold:
+                continue
+            key = dt.strftime("%Y-%m-%d")
+            if key in seen_low_days:
+                continue
+            seen_low_days.add(key)
+            low_dates.append(dt)
+
+        if low_dates:
+            report["last_low"] = low_dates[-1]
+            report["days_since_last_low"] = (as_of.date() - low_dates[-1].date()).days
+            dow = Counter(day_of_week_label(dt) for dt in low_dates)
+            report["typical_low_weekday"] = dow.most_common(1)[0][0]
+
+        gaps = [
+            (later.date() - earlier.date()).days
+            for earlier, later in zip(low_dates, low_dates[1:])
+            if (later.date() - earlier.date()).days > 0
+        ]
+        report["low_gaps_days"] = gaps
+        if gaps:
+            report["avg_low_gap_days"] = mean(gaps)
+            report["median_low_gap_days"] = median(gaps)
+            report["min_low_gap_days"] = min(gaps)
+            report["max_low_gap_days"] = max(gaps)
+            gap = report["median_low_gap_days"]
+            predicted = low_dates[-1].date() + timedelta(days=int(round(gap)))
+            if report["typical_low_weekday"]:
+                predicted = self._nudge_to_weekday(
+                    predicted, report["typical_low_weekday"], within_days=2
+                )
+            report["predicted_next_low"] = datetime.combine(
+                predicted, datetime.min.time()
+            )
+            delta = (predicted - as_of.date()).days
+            report["days_until_next_low"] = delta
+            if delta < 0:
+                report["overdue_low_days"] = abs(delta)
+
+        # Days from a low day until mood rises above the low threshold
+        recovery = []
+        for i, (entry, dt) in enumerate(dated):
+            if float(entry["mood"]) > self.low_threshold:
+                continue
+            for later_entry, later_dt in dated[i + 1 :]:
+                if float(later_entry["mood"]) > self.low_threshold:
+                    days = (later_dt.date() - dt.date()).days
+                    if days >= 0:
+                        recovery.append(max(days, 1) if days == 0 else days)
+                    break
+        report["recovery_gaps_days"] = recovery
+        if recovery:
+            report["median_recovery_days"] = median(recovery)
+            report["avg_recovery_days"] = mean(recovery)
+            if report["days_since_last_low"] is not None:
+                last_mood = float(dated[-1][0]["mood"])
+                if last_mood <= self.low_threshold:
+                    left = int(round(report["median_recovery_days"])) - int(
+                        report["days_since_last_low"]
+                    )
+                    report["days_until_typical_recovery"] = left
+
+        # How long each mood-band streak lasts → days until current band ends
+        streaks: list[tuple[str, int, datetime, datetime]] = []
+        # (band, length_days, start_dt, end_dt)
+        cur_band = None
+        streak_start = None
+        streak_end = None
+        for entry, dt in dated:
+            band = mood_band(entry.get("mood"))
+            if cur_band is None:
+                cur_band, streak_start, streak_end = band, dt, dt
+                continue
+            if band == cur_band:
+                streak_end = dt
+                continue
+            length = max(1, (streak_end.date() - streak_start.date()).days + 1)
+            streaks.append((cur_band, length, streak_start, streak_end))
+            cur_band, streak_start, streak_end = band, dt, dt
+        if cur_band is not None and streak_start is not None:
+            length = max(1, (streak_end.date() - streak_start.date()).days + 1)
+            streaks.append((cur_band, length, streak_start, streak_end))
+
+        completed = streaks[:-1] if len(streaks) > 1 else []
+        report["change_gaps_days"] = [length for _, length, _, _ in completed]
+        if streaks:
+            current_band, current_len, cur_start, _cur_end = streaks[-1]
+            same_band_lens = [length for band, length, _, _ in completed if band == current_band]
+            # Fall back to all completed streak lengths if this band is rare
+            pool = same_band_lens or report["change_gaps_days"]
+            if pool:
+                report["median_change_gap_days"] = median(pool)
+                typical = int(round(report["median_change_gap_days"]))
+                days_into = max(1, (as_of.date() - cur_start.date()).days + 1)
+                # Prefer calendar days into the open streak vs check-in count
+                days_into = max(days_into, current_len)
+                left = typical - days_into
+                predicted_change = as_of.date() + timedelta(days=max(left, 0))
+                report["predicted_next_change"] = datetime.combine(
+                    predicted_change, datetime.min.time()
+                )
+                report["days_until_mood_change"] = left
+                report["current_mood_band"] = current_band
+                report["days_in_current_band"] = days_into
+
+        # Markov next mood band from recent history
+        sequence = [mood_band(e.get("mood")) for e, _ in dated]
+        if len(sequence) >= 3:
+            model = MarkovChainPredictor(order=1)
+            model.fit(sequence)
+            nxt, prob = model.predict_next(sequence)
+            if nxt:
+                report["next_mood_band"] = nxt
+                report["next_mood_band_prob"] = prob
+
+    @staticmethod
+    def _nudge_to_weekday(day, weekday_label: str, within_days: int = 2):
+        labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        try:
+            target = labels.index(weekday_label)
+        except ValueError:
+            return day
+        best = day
+        best_dist = abs(day.weekday() - target)
+        for offset in range(-within_days, within_days + 1):
+            candidate = day + timedelta(days=offset)
+            dist = abs(candidate.weekday() - target)
+            if dist < best_dist or (dist == best_dist and abs(offset) < abs((best - day).days)):
+                best = candidate
+                best_dist = dist
+        return best
+
+    def _build_message(self, report: dict) -> str:
+        parts = []
+        if report.get("days_until_mood_change") is not None:
+            d = report["days_until_mood_change"]
+            band = report.get("current_mood_band") or "current"
+            into = report.get("days_in_current_band")
+            into_bit = f" ({band} for {into}d so far)" if into is not None else ""
+            if d < 0:
+                parts.append(
+                    f"A shift from {band} may already be due "
+                    f"(~{abs(d)} day(s) past your usual {band} streak){into_bit}."
+                )
+            elif d == 0:
+                parts.append(
+                    f"Based on your usual {band} streak length, a mood change is estimated today"
+                    f"{into_bit}."
+                )
+            else:
+                parts.append(
+                    f"Based on your usual {band} streak, mood typically changes in about "
+                    f"{d} day(s){into_bit}."
+                )
+        if report.get("days_until_next_low") is not None:
+            d = report["days_until_next_low"]
+            if d < 0:
+                parts.append(
+                    f"Next low-mood window may be overdue by ~{abs(d)} day(s) "
+                    f"(median gap {report['median_low_gap_days']:.0f}d)."
+                )
+            elif d == 0:
+                parts.append("Next low-mood window estimated today.")
+            else:
+                parts.append(
+                    f"Next low-mood day estimated in about {d} day(s) "
+                    f"(median gap {report['median_low_gap_days']:.0f}d)."
+                )
+        elif report.get("low_count", 0) == 1:
+            parts.append(
+                "Only one low-mood day so far — log another to estimate days until the next."
+            )
+        if report.get("days_until_typical_recovery") is not None:
+            r = report["days_until_typical_recovery"]
+            if r <= 0:
+                parts.append(
+                    f"After lows you usually recover in ~{report['median_recovery_days']:.0f} day(s) — "
+                    "that window is now."
+                )
+            else:
+                parts.append(
+                    f"If this low follows your pattern, mood often lifts in ~{r} day(s) "
+                    f"(typical recovery {report['median_recovery_days']:.0f}d)."
+                )
+        if report.get("next_mood_band"):
+            parts.append(
+                f"Sequence guess for next check-in: {report['next_mood_band']} "
+                f"({report['next_mood_band_prob']:.0%})."
+            )
+        if report.get("avg_7") is not None:
+            parts.append(
+                f"7-day avg {report['avg_7']:.1f}/10 · 30-day {report['avg_30']:.1f}/10 · "
+                f"{report['low_count']} low day(s)"
+            )
+        if not parts:
+            return f"{report.get('count', 0)} check-in(s) logged."
+        return " ".join(parts)
 
     def explain_mood(self, entry: dict, entries: list[dict]) -> str:
         report = self.analyze(entries)
@@ -420,33 +646,68 @@ class MoodPatternAnalyzer:
         return "\n".join(lines)
 
     @staticmethod
-    def _confidence(count: int) -> dict:
-        if count < 7:
+    def _confidence(count: int, report: dict | None = None) -> dict:
+        report = report or {}
+        gaps = report.get("low_gaps_days") or []
+        if count < 7 or len(gaps) < 1:
             return {
                 "confidence": "weak",
                 "confidence_label": "Weak",
-                "confidence_detail": f"Only {count} check-in(s) — treat links as early guesses.",
+                "confidence_detail": (
+                    f"Only {count} check-in(s) / {len(gaps)} low-day gap(s) — "
+                    "treat timing and links as early guesses."
+                ),
             }
-        if count < 21:
+        spread = (max(gaps) - min(gaps)) if gaps else 0
+        if count < 21 or len(gaps) < 3:
             return {
                 "confidence": "fair",
                 "confidence_label": "Fair",
-                "confidence_detail": f"{count} check-ins — patterns usable; keep logging toward 30 days.",
+                "confidence_detail": (
+                    f"{count} check-ins, {len(gaps)} low-day gap(s) "
+                    f"(spread {spread}d) — usable; keep logging."
+                ),
             }
         return {
             "confidence": "stronger",
             "confidence_label": "Stronger",
-            "confidence_detail": f"{count} check-ins — richer history for correlations.",
+            "confidence_detail": (
+                f"{count} check-ins, {len(gaps)} low-day gap(s) — "
+                "richer history for correlations and timing."
+            ),
         }
 
     def _reminder(
-        self, dated: list[tuple[dict, datetime]], as_of: datetime
+        self,
+        dated: list[tuple[dict, datetime]],
+        as_of: datetime,
+        report: dict | None = None,
     ) -> dict | None:
+        report = report or {}
         if not dated:
             return {
                 "level": "soon",
                 "title": "Start today",
                 "text": "Log today’s mood, sleep, and what happened — patterns need a few weeks.",
+            }
+        days_until_low = report.get("days_until_next_low")
+        if days_until_low is not None and days_until_low <= 2:
+            if days_until_low < 0:
+                return {
+                    "level": "urgent",
+                    "title": "Low-mood window overdue",
+                    "text": (
+                        f"Past gaps suggest a low-mood window may already be overdue "
+                        f"by ~{abs(days_until_low)} day(s). Review correlates and support options."
+                    ),
+                }
+            return {
+                "level": "soon",
+                "title": "Low-mood window soon",
+                "text": (
+                    f"Based on your gaps, the next low-mood day is estimated in about "
+                    f"{days_until_low} day(s). Sleep and alone time often show up in your log."
+                ),
             }
         _last_entry, last_dt = dated[-1]
         days_since = (as_of.date() - last_dt.date()).days

@@ -549,14 +549,18 @@ class MoodMinderApp(tk.Tk):
             "Plain-language explanation based on your past low-mood patterns.",
         )
 
-        # Insights
-        insights = ttk.LabelFrame(root, text="Insights", style="Card.TLabelframe")
+        # Insights + timing estimate
+        insights = ttk.LabelFrame(
+            root,
+            text="Insights  ·  days until mood change / next low",
+            style="Card.TLabelframe",
+        )
         insights.pack(fill="x", **pad)
         ib = ttk.Frame(insights, style="Panel.TFrame")
         ib.pack(fill="x")
         ttk.Button(
             ib,
-            text="Refresh insights",
+            text="Refresh estimate",
             style="Primary.TButton",
             command=lambda: self.refresh_insights(show_reminder_popup=True),
         ).pack(side="left")
@@ -581,13 +585,15 @@ class MoodMinderApp(tk.Tk):
             insights, textvariable=self.reminder_var, style="Warn.TLabel", wraplength=720
         )
         self.reminder_label.pack(anchor="w", pady=(4, 0))
-        self.result_var = tk.StringVar(value="Log check-ins to see 7-day and 30-day patterns.")
+        self.result_var = tk.StringVar(
+            value="Log check-ins to estimate days until mood changes and see correlates."
+        )
         ttk.Label(
             insights, textvariable=self.result_var, style="Result.TLabel", wraplength=720
         ).pack(anchor="w", pady=(6, 4))
         self.insights_detail = tk.Text(
             insights,
-            height=5,
+            height=9,
             wrap="word",
             state="disabled",
             bg=INPUT_BG,
@@ -600,6 +606,10 @@ class MoodMinderApp(tk.Tk):
             pady=6,
         )
         self.insights_detail.pack(fill="x")
+        ToolTip(
+            self.insights_detail,
+            "Gap-based timing (days until mood-band change / next low) plus top correlates.",
+        )
 
         # Charts
         charts = ttk.LabelFrame(
@@ -1035,8 +1045,69 @@ class MoodMinderApp(tk.Tk):
         person = self.person_var.get().strip()
         if person:
             lines.append(f"Journal for: {person}")
-        if report["factor_stats"]:
-            lines.append("Top low-mood correlates:")
+
+        lines.append("")
+        lines.append("Timing (from your gaps):")
+        if report.get("days_until_mood_change") is not None:
+            pred = report.get("predicted_next_change")
+            pred_s = pred.strftime("%Y-%m-%d") if pred else "—"
+            band = report.get("current_mood_band") or "?"
+            into = report.get("days_in_current_band")
+            lines.append(
+                f"  · Days until mood changes: {report['days_until_mood_change']} "
+                f"(est. {pred_s}; usual {band} streak "
+                f"{report.get('median_change_gap_days'):.1f}d, now day {into})"
+            )
+        else:
+            lines.append("  · Need more band changes in the log to estimate mood-shift timing.")
+        if report.get("days_until_next_low") is not None:
+            pred = report.get("predicted_next_low")
+            pred_s = pred.strftime("%Y-%m-%d") if pred else "—"
+            gaps = report.get("low_gaps_days") or []
+            gap_txt = ", ".join(str(g) for g in gaps[-6:])
+            lines.append(
+                f"  · Days until next low (≤4): {report['days_until_next_low']} "
+                f"(est. {pred_s}; median {report.get('median_low_gap_days'):.1f}d)"
+            )
+            if gap_txt:
+                lines.append(f"  · Recent low-day gaps (days): {gap_txt}")
+            if report.get("typical_low_weekday"):
+                lines.append(f"  · Low days often fall on: {report['typical_low_weekday']}")
+        elif report.get("low_count", 0) < 2:
+            lines.append("  · Log 2+ low-mood days (≤4) to estimate days until the next low.")
+        if report.get("median_recovery_days") is not None:
+            rec = report.get("days_until_typical_recovery")
+            rec_bit = (
+                f" · ~{rec} day(s) left in this episode"
+                if rec is not None
+                else ""
+            )
+            lines.append(
+                f"  · Typical recovery after a low: {report['median_recovery_days']:.1f} day(s)"
+                f"{rec_bit}"
+            )
+        if report.get("next_mood_band"):
+            lines.append(
+                f"  · Next check-in band (sequence): {report['next_mood_band']} "
+                f"({report['next_mood_band_prob']:.0%})"
+            )
+
+        correlates = [
+            s
+            for s in report["factor_stats"]
+            if s["low_count"] >= 1 and s["count"] >= 2
+        ][:8]
+        if correlates:
+            lines.append("")
+            lines.append("Top low-mood correlates (need 2+ days with factor):")
+            for s in correlates:
+                lines.append(
+                    f"  · {s['category']}:{s['value']} → low on {s['p_low']:.0%} "
+                    f"({s['low_count']}/{s['count']} days)"
+                )
+        elif report["factor_stats"]:
+            lines.append("")
+            lines.append("Early correlates (still thin — keep logging):")
             for s in report["factor_stats"][:6]:
                 if s["low_count"] < 1:
                     continue
@@ -1187,14 +1258,33 @@ class MoodMinderApp(tk.Tk):
             f"Person: {self.person_var.get().strip() or '—'}",
             "=" * 56,
             "",
-            "INSIGHTS",
+            "INSIGHTS / TIMING",
             "-" * 56,
             report["message"],
             f"Confidence: {report['confidence_label']} — {report['confidence_detail']}",
-            "",
-            "CHECK-INS",
-            "-" * 56,
         ]
+        if report.get("days_until_mood_change") is not None:
+            lines.append(
+                f"Days until mood-band change: {report['days_until_mood_change']} "
+                f"(median gap {report.get('median_change_gap_days')})"
+            )
+        if report.get("days_until_next_low") is not None:
+            lines.append(
+                f"Days until next low: {report['days_until_next_low']} "
+                f"(median gap {report.get('median_low_gap_days')}; "
+                f"gaps {report.get('low_gaps_days')})"
+            )
+        if report.get("median_recovery_days") is not None:
+            lines.append(
+                f"Typical recovery after low: {report['median_recovery_days']:.1f} day(s)"
+            )
+        lines.extend(
+            [
+                "",
+                "CHECK-INS",
+                "-" * 56,
+            ]
+        )
         if not self.entries:
             lines.append("(No check-ins.)")
         else:
@@ -1314,8 +1404,9 @@ class MoodMinderApp(tk.Tk):
             "Mood Minder help",
             "Mood Minder is a personal mood journal.\n\n"
             "1. Log mood (1–10), emotions, sleep, food, people, events, location, thoughts.\n"
-            "2. After enough days, Insights and Charts show patterns.\n"
-            "3. The Depression correlation log lists low days (≤4) with factor probabilities.\n"
+            "2. Insights estimates days until a mood-band change and the next low day (≤4) "
+            "from gaps in your log — same idea as HumanPredict’s HR timing.\n"
+            "3. Charts and the Depression correlation log show factor probabilities on low days.\n"
             "4. Why this mood explains the selected check-in in plain language.\n"
             "5. Save PDF creates a report, then asks if you want to print.\n\n"
             "Not a medical device or diagnosis. If you are in crisis, seek professional help.",
