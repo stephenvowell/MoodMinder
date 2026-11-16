@@ -14,6 +14,10 @@ POOR_SLEEP_HOURS = 6.0
 # timing estimates (e.g. "low-mood window overdue") are not trustworthy.
 STALE_LOG_DAYS = 7
 
+# Single source of truth for the app version (semantic versioning).
+# Bump this one constant for a new release; app.py reads it from here.
+VERSION = "1.0.0"
+
 EMOTION_PRESETS = [
     "anxious",
     "sad",

@@ -18,6 +18,7 @@ from mood_engine import (
     MoodPatternAnalyzer,
     day_of_week_label,
     time_of_day_bucket,
+    VERSION,
 )
 from pdf_export import write_text_pdf
 
@@ -168,7 +169,7 @@ def format_entry_line(index: int, entry: dict) -> str:
 class MoodMinderApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Mood Minder")
+        self.title(f"Mood Minder {VERSION}")
         self.geometry("780x1000")
         self.minsize(700, 840)
         self.configure(bg=BG)
@@ -1413,7 +1414,7 @@ class MoodMinderApp(tk.Tk):
     def show_help(self):
         messagebox.showinfo(
             "Mood Minder help",
-            "Mood Minder is a personal mood journal.\n\n"
+            f"Mood Minder is a personal mood journal (version {VERSION}).\n\n"
             "1. Log mood (1–10), emotions, sleep, food, people, events, location, thoughts.\n"
             "2. Insights estimates days until a mood-band change and the next low day (≤4) "
             "from gaps in your log — same idea as HumanPredict’s HR timing.\n"
